@@ -5,10 +5,19 @@ set(CMAKE_C_STANDARD 11)
 
 add_library(native-app SHARED
     main.c
-    ui_renderer.c
-    wifi_stats.c
-    font8x16.c
-    tt_font.c
+    ui.c
+    render.c
+    text.c
+    theme.c
+    sys_cpu.c
+    sys_mem.c
+    sys_net.c
+    sys_batt.c
+    bench.c
+)
+
+target_link_options(native-app PRIVATE
+    -Wl,--gc-sections
 )
 
 target_link_libraries(native-app

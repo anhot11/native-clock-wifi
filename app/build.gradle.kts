@@ -10,16 +10,24 @@ android {
         applicationId = "com.example.nativec"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
 
         externalNativeBuild {
             cmake {
-                cFlags += listOf("-std=c11", "-Wall", "-O3")
+                cFlags += listOf(
+                    "-std=c11",
+                    "-Wall",
+                    "-O3",
+                    "-flto",
+                    "-fvisibility=hidden",
+                    "-ffunction-sections",
+                    "-fdata-sections"
+                )
             }
         }
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
     }
 

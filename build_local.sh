@@ -1,17 +1,26 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -e
 
-echo "[1/4] Compiling native C code with clang..."
-clang -shared -fPIC -O3 -Wall \
+echo "[1/4] Compiling modular native C code with clang (-O3 -flto -s)..."
+clang -shared -fPIC -O3 -flto -fvisibility=hidden -ffunction-sections -fdata-sections \
+  -Wl,--gc-sections -Wall \
   app/src/main/cpp/main.c \
-  app/src/main/cpp/ui_renderer.c \
-  app/src/main/cpp/wifi_stats.c \
-  app/src/main/cpp/font8x16.c \
-  app/src/main/cpp/tt_font.c \
+  app/src/main/cpp/ui.c \
+  app/src/main/cpp/render.c \
+  app/src/main/cpp/text.c \
+  app/src/main/cpp/theme.c \
+  app/src/main/cpp/sys_cpu.c \
+  app/src/main/cpp/sys_mem.c \
+  app/src/main/cpp/sys_net.c \
+  app/src/main/cpp/sys_batt.c \
+  app/src/main/cpp/bench.c \
+  -Iapp/src/main/cpp \
   -landroid -llog -lm \
   -o libnative-app.so
 
-echo "[2/4] Packaging base APK with aapt..."
+strip -s libnative-app.so
+
+echo "[2/4] Packaging APK with aapt..."
 mkdir -p lib/arm64-v8a
 cp libnative-app.so lib/arm64-v8a/
 rm -f base.apk app-debug.apk
@@ -24,11 +33,13 @@ if [ ! -f debug.keystore ]; then
 fi
 apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out app-debug.apk base.apk
 
-echo "[4/4] Installing on device via ADB if connected..."
+echo "[4/4] Verifying APK size and ABI..."
+ls -lh libnative-app.so app-debug.apk
+
 if adb devices | grep -q "device$"; then
   adb install -r app-debug.apk
   adb shell am start -n com.example.nativec/android.app.NativeActivity
   echo "App successfully installed and launched in portrait mode!"
 else
-  echo "ADB device not currently connected. APK successfully generated at app-debug.apk!"
+  echo "APK successfully built and signed at app-debug.apk!"
 fi

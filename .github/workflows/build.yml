@@ -3,14 +3,30 @@ name: Build Native Android C App
 on:
   push:
     branches: [ "main", "master" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build:
-    name: Compile APK (Android 11 - 16 / Full C)
+  test_host:
+    name: Run Unit Tests on Host (GCC / Linux)
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Run Parsers & Engine Unit Tests
+        run: |
+          make test CC=gcc
+
+  build:
+    name: Compile Multi-ABI APK (arm64-v8a & armeabi-v7a)
+    runs-on: ubuntu-latest
+    needs: test_host
 
     steps:
       - name: Checkout Source Code
@@ -33,9 +49,41 @@ jobs:
       - name: Build Android Release APK
         run: gradle assembleRelease --stacktrace
 
+      - name: Verify Binary & APK Size Budget (< 400 KB)
+        run: |
+          echo "=== VERIFYING BINARY AND APK FOOTPRINT ==="
+          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Error: No release APK found!"
+            exit 1
+          fi
+          
+          APK_SIZE=$(stat -c%s "$APK_PATH")
+          echo "Release APK: $APK_PATH ($APK_SIZE bytes / $((APK_SIZE / 1024)) KB)"
+          
+          find app/build/intermediates/merged_native_libs -name "*.so" -exec ls -lh {} + || true
+          
+          # Enforce APK size budget (Budget: max 400 KB)
+          MAX_BYTES=$((400 * 1024))
+          if [ "$APK_SIZE" -gt "$MAX_BYTES" ]; then
+            echo "ERROR: APK size ($APK_SIZE bytes) exceeds the budget of $MAX_BYTES bytes!"
+            exit 1
+          fi
+          echo "SUCCESS: APK size is well within the lightweight budget!"
+
       - name: Upload Compiled APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NativeC-Clock-WiFi-APK
+          name: MonitorNativo-v2.0-Release-APK
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
+
+      - name: Publish Release if Tagged
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
