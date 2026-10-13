@@ -8,6 +8,7 @@ add_library(native-app SHARED
     ui_renderer.c
     wifi_stats.c
     font8x16.c
+    tt_font.c
 )
 
 target_link_libraries(native-app

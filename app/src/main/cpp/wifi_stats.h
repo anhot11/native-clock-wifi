@@ -6,6 +6,14 @@
 #include <stdbool.h>
 
 #define HISTORY_LEN 40
+#define MAX_NET_IFACES 6
+
+typedef struct {
+    char name[16];      // e.g. "wlan0", "rmnet0", "tun0"
+    char ip[48];        // e.g. "192.168.7.5"
+    bool is_up;
+    bool is_loopback;
+} NetInterfaceInfo;
 
 typedef struct {
     bool is_connected;
@@ -31,6 +39,19 @@ typedef struct {
     float rx_history[HISTORY_LEN];
     float tx_history[HISTORY_LEN];
     int history_idx;
+    
+    // Android Connections & Network Diagnostics
+    char conn_type[32];        // "Wi-Fi Activo", "Datos Moviles", "VPN", etc.
+    char local_ipv4[32];       // e.g. "192.168.7.5"
+    char gateway_ip[32];       // e.g. "192.168.7.1"
+    char netmask[32];          // e.g. "255.255.255.0"
+    char dns1[32];             // e.g. "8.8.8.8"
+    char dns2[32];             // e.g. "8.8.4.4"
+    bool has_internet;
+    
+    // Active interfaces list
+    NetInterfaceInfo interfaces[MAX_NET_IFACES];
+    int iface_count;
     
     // Timing
     double last_update_sec;

@@ -21,7 +21,7 @@ typedef struct {
     const char* theme_name;
 } UITheme;
 
-typedef struct {
+typedef struct UIRenderer {
     int width;
     int height;
     int stride;
@@ -32,6 +32,8 @@ typedef struct {
     int touch_y;
     float touch_ripple;     // 0.0 to 1.0
     int fps;
+    float dp_scale;
+    bool fonts_initialized;
 } UIRenderer;
 
 void ui_renderer_init(UIRenderer* ui);

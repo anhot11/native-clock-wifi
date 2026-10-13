@@ -2,6 +2,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <android/log.h>
 
 #define TAG "WiFiStats"
@@ -21,10 +25,53 @@ static double get_time_sec(void) {
 void wifi_stats_init(WifiStats* stats) {
     if (stats) {
         memset(stats, 0, sizeof(WifiStats));
+        strncpy(stats->conn_type, "Comprobando...", sizeof(stats->conn_type));
+        strncpy(stats->local_ipv4, "--", sizeof(stats->local_ipv4));
+        strncpy(stats->gateway_ip, "--", sizeof(stats->gateway_ip));
+        strncpy(stats->netmask, "--", sizeof(stats->netmask));
+        strncpy(stats->dns1, "--", sizeof(stats->dns1));
+        strncpy(stats->dns2, "--", sizeof(stats->dns2));
     }
     g_last_rx = 0;
     g_last_tx = 0;
     g_last_timestamp = get_time_sec();
+}
+
+static void ip_int_to_str(int ip, char* out, size_t out_len) {
+    snprintf(out, out_len, "%d.%d.%d.%d",
+             ip & 0xFF,
+             (ip >> 8) & 0xFF,
+             (ip >> 16) & 0xFF,
+             (ip >> 24) & 0xFF);
+}
+
+static void scan_network_interfaces(WifiStats* stats) {
+    stats->iface_count = 0;
+    struct ifaddrs* ifap = NULL;
+    if (getifaddrs(&ifap) != 0 || !ifap) return;
+
+    for (struct ifaddrs* ifa = ifap; ifa != NULL && stats->iface_count < MAX_NET_IFACES; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in* sa = (struct sockaddr_in*)ifa->ifa_addr;
+            NetInterfaceInfo* info = &stats->interfaces[stats->iface_count];
+            strncpy(info->name, ifa->ifa_name, sizeof(info->name) - 1);
+            info->name[sizeof(info->name) - 1] = '\0';
+
+            inet_ntop(AF_INET, &sa->sin_addr, info->ip, sizeof(info->ip));
+            info->is_up = (ifa->ifa_flags & IFF_UP) != 0;
+            info->is_loopback = (ifa->ifa_flags & IFF_LOOPBACK) != 0;
+
+            if (strcmp(info->name, "wlan0") == 0) {
+                strncpy(stats->local_ipv4, info->ip, sizeof(stats->local_ipv4));
+            } else if (strcmp(stats->local_ipv4, "--") == 0 && !info->is_loopback) {
+                strncpy(stats->local_ipv4, info->ip, sizeof(stats->local_ipv4));
+            }
+
+            stats->iface_count++;
+        }
+    }
+    freeifaddrs(ifap);
 }
 
 void wifi_stats_update(JNIEnv* env, jobject context, WifiStats* stats) {
@@ -36,6 +83,7 @@ void wifi_stats_update(JNIEnv* env, jobject context, WifiStats* stats) {
 
     // Reset base fields
     stats->is_connected = false;
+    stats->has_internet = false;
     stats->link_speed_mbps = 0;
     stats->tx_link_speed_mbps = -1;
     stats->rx_link_speed_mbps = -1;
@@ -47,8 +95,12 @@ void wifi_stats_update(JNIEnv* env, jobject context, WifiStats* stats) {
     strncpy(stats->standard_str, "Desconocido", sizeof(stats->standard_str));
     strncpy(stats->ssid, "<No conectado>", sizeof(stats->ssid));
     strncpy(stats->bssid, "--:--:--:--:--:--", sizeof(stats->bssid));
+    strncpy(stats->conn_type, "Sin conexion", sizeof(stats->conn_type));
 
-    // 1. Query TrafficStats for live bandwidth
+    // 1. Scan POSIX network interfaces directly
+    scan_network_interfaces(stats);
+
+    // 2. Query TrafficStats for live bandwidth
     jclass trafficClass = (*env)->FindClass(env, "android/net/TrafficStats");
     if (trafficClass) {
         jmethodID mGetTotalRx = (*env)->GetStaticMethodID(env, trafficClass, "getTotalRxBytes", "()J");
@@ -73,7 +125,6 @@ void wifi_stats_update(JNIEnv* env, jobject context, WifiStats* stats) {
                 stats->tx_rate_kbps = 0.0;
             }
 
-            // Push to history ring buffer
             stats->rx_history[stats->history_idx] = (float)stats->rx_rate_kbps;
             stats->tx_history[stats->history_idx] = (float)stats->tx_rate_kbps;
             stats->history_idx = (stats->history_idx + 1) % HISTORY_LEN;
@@ -88,7 +139,7 @@ void wifi_stats_update(JNIEnv* env, jobject context, WifiStats* stats) {
     g_last_timestamp = now;
     stats->last_update_sec = now;
 
-    // 2. Query WifiManager
+    // 3. Query WifiManager
     jclass ctxClass = (*env)->GetObjectClass(env, context);
     if (!ctxClass) {
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
@@ -105,165 +156,147 @@ void wifi_stats_update(JNIEnv* env, jobject context, WifiStats* stats) {
     jstring sWifi = (*env)->NewStringUTF(env, "wifi");
     jobject wifiMgr = (*env)->CallObjectMethod(env, context, mGetSystemService, sWifi);
     (*env)->DeleteLocalRef(env, sWifi);
-    (*env)->DeleteLocalRef(env, ctxClass);
 
     if ((*env)->ExceptionCheck(env)) {
         (*env)->ExceptionClear(env);
-        return;
+        wifiMgr = NULL;
     }
 
-    if (!wifiMgr) return;
+    if (wifiMgr) {
+        jclass wifiMgrClass = (*env)->GetObjectClass(env, wifiMgr);
 
-    jclass wifiMgrClass = (*env)->GetObjectClass(env, wifiMgr);
-    jmethodID mGetConnInfo = (*env)->GetMethodID(env, wifiMgrClass, "getConnectionInfo", "()Landroid/net/wifi/WifiInfo;");
+        // A. DhcpInfo for Gateway, Netmask, DNS
+        jmethodID mGetDhcp = (*env)->GetMethodID(env, wifiMgrClass, "getDhcpInfo", "()Landroid/net/DhcpInfo;");
+        if (mGetDhcp) {
+            jobject dhcp = (*env)->CallObjectMethod(env, wifiMgr, mGetDhcp);
+            if (dhcp && !(*env)->ExceptionCheck(env)) {
+                jclass dhcpClass = (*env)->GetObjectClass(env, dhcp);
+                jfieldID fGateway = (*env)->GetFieldID(env, dhcpClass, "gateway", "I");
+                jfieldID fNetmask = (*env)->GetFieldID(env, dhcpClass, "netmask", "I");
+                jfieldID fDns1 = (*env)->GetFieldID(env, dhcpClass, "dns1", "I");
+                jfieldID fDns2 = (*env)->GetFieldID(env, dhcpClass, "dns2", "I");
 
-    if (mGetConnInfo) {
-        jobject wifiInfo = (*env)->CallObjectMethod(env, wifiMgr, mGetConnInfo);
-        if (wifiInfo && !(*env)->ExceptionCheck(env)) {
-            jclass infoClass = (*env)->GetObjectClass(env, wifiInfo);
-
-            // getLinkSpeed()
-            jmethodID mGetLinkSpeed = (*env)->GetMethodID(env, infoClass, "getLinkSpeed", "()I");
-            if (mGetLinkSpeed) {
-                stats->link_speed_mbps = (*env)->CallIntMethod(env, wifiInfo, mGetLinkSpeed);
-                if (stats->link_speed_mbps > 0) {
-                    stats->is_connected = true;
+                if (fGateway) {
+                    int gw = (*env)->GetIntField(env, dhcp, fGateway);
+                    if (gw != 0) ip_int_to_str(gw, stats->gateway_ip, sizeof(stats->gateway_ip));
                 }
-            }
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-
-            // getTxLinkSpeedMbps() (Android 10 / API 29+)
-            jmethodID mGetTxSpeed = (*env)->GetMethodID(env, infoClass, "getTxLinkSpeedMbps", "()I");
-            if (mGetTxSpeed) {
-                stats->tx_link_speed_mbps = (*env)->CallIntMethod(env, wifiInfo, mGetTxSpeed);
-            }
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-
-            // getRxLinkSpeedMbps() (Android 10 / API 29+)
-            jmethodID mGetRxSpeed = (*env)->GetMethodID(env, infoClass, "getRxLinkSpeedMbps", "()I");
-            if (mGetRxSpeed) {
-                stats->rx_link_speed_mbps = (*env)->CallIntMethod(env, wifiInfo, mGetRxSpeed);
-            }
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-
-            // getMaxSupportedTxLinkSpeedMbps() (Android 11 / API 30+)
-            jmethodID mGetMaxTx = (*env)->GetMethodID(env, infoClass, "getMaxSupportedTxLinkSpeedMbps", "()I");
-            if (mGetMaxTx) {
-                stats->max_tx_speed_mbps = (*env)->CallIntMethod(env, wifiInfo, mGetMaxTx);
-            }
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-
-            // getMaxSupportedRxLinkSpeedMbps() (Android 11 / API 30+)
-            jmethodID mGetMaxRx = (*env)->GetMethodID(env, infoClass, "getMaxSupportedRxLinkSpeedMbps", "()I");
-            if (mGetMaxRx) {
-                stats->max_rx_speed_mbps = (*env)->CallIntMethod(env, wifiInfo, mGetMaxRx);
-            }
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-
-            // getRssi()
-            jmethodID mGetRssi = (*env)->GetMethodID(env, infoClass, "getRssi", "()I");
-            if (mGetRssi) {
-                stats->rssi_dbm = (*env)->CallIntMethod(env, wifiInfo, mGetRssi);
-            }
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-
-            // getFrequency()
-            jmethodID mGetFreq = (*env)->GetMethodID(env, infoClass, "getFrequency", "()I");
-            if (mGetFreq) {
-                stats->frequency_mhz = (*env)->CallIntMethod(env, wifiInfo, mGetFreq);
-            }
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-
-            // getWifiStandard() (Android 11 / API 30+)
-            jmethodID mGetStd = (*env)->GetMethodID(env, infoClass, "getWifiStandard", "()I");
-            if (mGetStd) {
-                int std = (*env)->CallIntMethod(env, wifiInfo, mGetStd);
-                switch (std) {
-                    case 4: strncpy(stats->standard_str, "Wi-Fi 4 (802.11n)", sizeof(stats->standard_str)); break;
-                    case 5: strncpy(stats->standard_str, "Wi-Fi 5 (802.11ac)", sizeof(stats->standard_str)); break;
-                    case 6: strncpy(stats->standard_str, "Wi-Fi 6 (802.11ax)", sizeof(stats->standard_str)); break;
-                    case 7: strncpy(stats->standard_str, "Wi-Fi 6E (6 GHz)", sizeof(stats->standard_str)); break;
-                    case 8: strncpy(stats->standard_str, "Wi-Fi 7 (802.11be)", sizeof(stats->standard_str)); break;
-                    case 1: strncpy(stats->standard_str, "Legacy (802.11a/g)", sizeof(stats->standard_str)); break;
-                    default:
-                        if (stats->frequency_mhz > 5000) {
-                            strncpy(stats->standard_str, "Wi-Fi 5 GHz", sizeof(stats->standard_str));
-                        } else {
-                            strncpy(stats->standard_str, "Wi-Fi 2.4 GHz", sizeof(stats->standard_str));
-                        }
-                        break;
+                if (fNetmask) {
+                    int nm = (*env)->GetIntField(env, dhcp, fNetmask);
+                    if (nm != 0) ip_int_to_str(nm, stats->netmask, sizeof(stats->netmask));
                 }
-            } else {
-                if (stats->frequency_mhz > 5000) {
-                    strncpy(stats->standard_str, "Wi-Fi 5 GHz", sizeof(stats->standard_str));
-                } else {
-                    strncpy(stats->standard_str, "Wi-Fi 2.4 GHz", sizeof(stats->standard_str));
+                if (fDns1) {
+                    int d1 = (*env)->GetIntField(env, dhcp, fDns1);
+                    if (d1 != 0) ip_int_to_str(d1, stats->dns1, sizeof(stats->dns1));
                 }
-            }
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-
-            // getSSID()
-            jmethodID mGetSsid = (*env)->GetMethodID(env, infoClass, "getSSID", "()Ljava/lang/String;");
-            if (mGetSsid) {
-                jstring jSsid = (jstring)(*env)->CallObjectMethod(env, wifiInfo, mGetSsid);
-                if (jSsid && !(*env)->ExceptionCheck(env)) {
-                    const char* str = (*env)->GetStringUTFChars(env, jSsid, NULL);
-                    if (str) {
-                        const char* p = str;
-                        if (*p == '"') p++;
-                        strncpy(stats->ssid, p, sizeof(stats->ssid) - 1);
-                        stats->ssid[sizeof(stats->ssid) - 1] = '\0';
-                        size_t len = strlen(stats->ssid);
-                        if (len > 0 && stats->ssid[len - 1] == '"') {
-                            stats->ssid[len - 1] = '\0';
-                        }
-                        (*env)->ReleaseStringUTFChars(env, jSsid, str);
-                    }
-                    (*env)->DeleteLocalRef(env, jSsid);
+                if (fDns2) {
+                    int d2 = (*env)->GetIntField(env, dhcp, fDns2);
+                    if (d2 != 0) ip_int_to_str(d2, stats->dns2, sizeof(stats->dns2));
                 }
-            }
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 
-            // If SSID is <unknown ssid>, improve label
-            if (strcmp(stats->ssid, "<unknown ssid>") == 0 || strcmp(stats->ssid, "0x") == 0) {
-                strncpy(stats->ssid, "Wi-Fi Conectado (Activa GPS para SSID)", sizeof(stats->ssid) - 1);
+                (*env)->DeleteLocalRef(env, dhcpClass);
+                (*env)->DeleteLocalRef(env, dhcp);
             }
-
-            // getBSSID()
-            jmethodID mGetBssid = (*env)->GetMethodID(env, infoClass, "getBSSID", "()Ljava/lang/String;");
-            if (mGetBssid) {
-                jstring jBssid = (jstring)(*env)->CallObjectMethod(env, wifiInfo, mGetBssid);
-                if (jBssid && !(*env)->ExceptionCheck(env)) {
-                    const char* str = (*env)->GetStringUTFChars(env, jBssid, NULL);
-                    if (str) {
-                        strncpy(stats->bssid, str, sizeof(stats->bssid) - 1);
-                        stats->bssid[sizeof(stats->bssid) - 1] = '\0';
-                        (*env)->ReleaseStringUTFChars(env, jBssid, str);
-                    }
-                    (*env)->DeleteLocalRef(env, jBssid);
-                }
-            }
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-
-            // Signal level calculation
-            if (stats->rssi_dbm > -55) {
-                stats->signal_level = 4;
-            } else if (stats->rssi_dbm > -68) {
-                stats->signal_level = 3;
-            } else if (stats->rssi_dbm > -78) {
-                stats->signal_level = 2;
-            } else if (stats->rssi_dbm > -88) {
-                stats->signal_level = 1;
-            } else {
-                stats->signal_level = 0;
-            }
-
-            (*env)->DeleteLocalRef(env, infoClass);
-            (*env)->DeleteLocalRef(env, wifiInfo);
         }
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+        // B. ConnectionInfo for Wi-Fi speed & signal
+        jmethodID mGetConnInfo = (*env)->GetMethodID(env, wifiMgrClass, "getConnectionInfo", "()Landroid/net/wifi/WifiInfo;");
+        if (mGetConnInfo) {
+            jobject wifiInfo = (*env)->CallObjectMethod(env, wifiMgr, mGetConnInfo);
+            if (wifiInfo && !(*env)->ExceptionCheck(env)) {
+                jclass infoClass = (*env)->GetObjectClass(env, wifiInfo);
+
+                jmethodID mGetLinkSpeed = (*env)->GetMethodID(env, infoClass, "getLinkSpeed", "()I");
+                if (mGetLinkSpeed) {
+                    stats->link_speed_mbps = (*env)->CallIntMethod(env, wifiInfo, mGetLinkSpeed);
+                    if (stats->link_speed_mbps > 0) {
+                        stats->is_connected = true;
+                        stats->has_internet = true;
+                        strncpy(stats->conn_type, "Wi-Fi (Conectado)", sizeof(stats->conn_type));
+                    }
+                }
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+                jmethodID mGetTxSpeed = (*env)->GetMethodID(env, infoClass, "getTxLinkSpeedMbps", "()I");
+                if (mGetTxSpeed) stats->tx_link_speed_mbps = (*env)->CallIntMethod(env, wifiInfo, mGetTxSpeed);
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+                jmethodID mGetRxSpeed = (*env)->GetMethodID(env, infoClass, "getRxLinkSpeedMbps", "()I");
+                if (mGetRxSpeed) stats->rx_link_speed_mbps = (*env)->CallIntMethod(env, wifiInfo, mGetRxSpeed);
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+                jmethodID mGetMaxTx = (*env)->GetMethodID(env, infoClass, "getMaxSupportedTxLinkSpeedMbps", "()I");
+                if (mGetMaxTx) stats->max_tx_speed_mbps = (*env)->CallIntMethod(env, wifiInfo, mGetMaxTx);
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+                jmethodID mGetMaxRx = (*env)->GetMethodID(env, infoClass, "getMaxSupportedRxLinkSpeedMbps", "()I");
+                if (mGetMaxRx) stats->max_rx_speed_mbps = (*env)->CallIntMethod(env, wifiInfo, mGetMaxRx);
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+                jmethodID mGetRssi = (*env)->GetMethodID(env, infoClass, "getRssi", "()I");
+                if (mGetRssi) stats->rssi_dbm = (*env)->CallIntMethod(env, wifiInfo, mGetRssi);
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+                jmethodID mGetFreq = (*env)->GetMethodID(env, infoClass, "getFrequency", "()I");
+                if (mGetFreq) stats->frequency_mhz = (*env)->CallIntMethod(env, wifiInfo, mGetFreq);
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+                jmethodID mGetStd = (*env)->GetMethodID(env, infoClass, "getWifiStandard", "()I");
+                if (mGetStd) {
+                    int std = (*env)->CallIntMethod(env, wifiInfo, mGetStd);
+                    switch (std) {
+                        case 4: strncpy(stats->standard_str, "Wi-Fi 4 (802.11n)", sizeof(stats->standard_str)); break;
+                        case 5: strncpy(stats->standard_str, "Wi-Fi 5 (802.11ac)", sizeof(stats->standard_str)); break;
+                        case 6: strncpy(stats->standard_str, "Wi-Fi 6 (802.11ax)", sizeof(stats->standard_str)); break;
+                        case 7: strncpy(stats->standard_str, "Wi-Fi 6E (6 GHz)", sizeof(stats->standard_str)); break;
+                        case 8: strncpy(stats->standard_str, "Wi-Fi 7 (802.11be)", sizeof(stats->standard_str)); break;
+                        case 1: strncpy(stats->standard_str, "Legacy (802.11a/g)", sizeof(stats->standard_str)); break;
+                        default:
+                            if (stats->frequency_mhz > 5000) strncpy(stats->standard_str, "Wi-Fi 5 GHz", sizeof(stats->standard_str));
+                            else strncpy(stats->standard_str, "Wi-Fi 2.4 GHz", sizeof(stats->standard_str));
+                            break;
+                    }
+                }
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+                jmethodID mGetSsid = (*env)->GetMethodID(env, infoClass, "getSSID", "()Ljava/lang/String;");
+                if (mGetSsid) {
+                    jstring jSsid = (jstring)(*env)->CallObjectMethod(env, wifiInfo, mGetSsid);
+                    if (jSsid && !(*env)->ExceptionCheck(env)) {
+                        const char* str = (*env)->GetStringUTFChars(env, jSsid, NULL);
+                        if (str) {
+                            const char* p = str;
+                            if (*p == '"') p++;
+                            strncpy(stats->ssid, p, sizeof(stats->ssid) - 1);
+                            stats->ssid[sizeof(stats->ssid) - 1] = '\0';
+                            size_t len = strlen(stats->ssid);
+                            if (len > 0 && stats->ssid[len - 1] == '"') stats->ssid[len - 1] = '\0';
+                            (*env)->ReleaseStringUTFChars(env, jSsid, str);
+                        }
+                        (*env)->DeleteLocalRef(env, jSsid);
+                    }
+                }
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+                if (strcmp(stats->ssid, "<unknown ssid>") == 0 || strcmp(stats->ssid, "0x") == 0) {
+                    strncpy(stats->ssid, "Wi-Fi (Conectado)", sizeof(stats->ssid) - 1);
+                }
+
+                if (stats->rssi_dbm > -55) stats->signal_level = 4;
+                else if (stats->rssi_dbm > -68) stats->signal_level = 3;
+                else if (stats->rssi_dbm > -78) stats->signal_level = 2;
+                else if (stats->rssi_dbm > -88) stats->signal_level = 1;
+                else stats->signal_level = 0;
+
+                (*env)->DeleteLocalRef(env, infoClass);
+                (*env)->DeleteLocalRef(env, wifiInfo);
+            }
+        }
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+        (*env)->DeleteLocalRef(env, wifiMgrClass);
+        (*env)->DeleteLocalRef(env, wifiMgr);
     }
 
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-    (*env)->DeleteLocalRef(env, wifiMgrClass);
-    (*env)->DeleteLocalRef(env, wifiMgr);
+    (*env)->DeleteLocalRef(env, ctxClass);
 }

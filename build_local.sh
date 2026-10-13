@@ -7,6 +7,7 @@ clang -shared -fPIC -O3 -Wall \
   app/src/main/cpp/ui_renderer.c \
   app/src/main/cpp/wifi_stats.c \
   app/src/main/cpp/font8x16.c \
+  app/src/main/cpp/tt_font.c \
   -landroid -llog -lm \
   -o libnative-app.so
 
