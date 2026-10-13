@@ -10,6 +10,7 @@ typedef struct {
     uint32_t bg_color;
     uint32_t card_bg;
     uint32_t card_border;
+    uint32_t card_inner_bg;
     uint32_t text_primary;
     uint32_t text_secondary;
     uint32_t text_muted;
@@ -27,7 +28,7 @@ typedef struct UIRenderer {
     int stride;
     uint32_t* pixels;
     int theme_index;
-    float anim_phase;       // 0.0 to 1.0 for pulsing animations
+    float anim_phase;       // 0.0 to 1.0 for subtle breathing animations
     int touch_x;
     int touch_y;
     float touch_ripple;     // 0.0 to 1.0

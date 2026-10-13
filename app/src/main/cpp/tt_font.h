@@ -9,7 +9,8 @@ typedef enum {
     TT_SIZE_SM,   // ~14dp: card headers, subheadings
     TT_SIZE_MD,   // ~18dp: regular text, values, buttons
     TT_SIZE_LG,   // ~26dp: main titles, card titles
-    TT_SIZE_XL,   // ~42dp: clock, large speed numbers
+    TT_SIZE_XL,   // ~36dp: large speed numbers
+    TT_SIZE_XXL,  // ~52dp: hero clock display
     TT_NUM_SIZES
 } TTFontSize;
 

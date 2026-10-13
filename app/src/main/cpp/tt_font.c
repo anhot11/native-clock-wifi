@@ -39,11 +39,12 @@ static uint8_t* g_font_buffer = NULL;
 static float g_current_scale = 1.0f;
 
 static const float BASE_DP_SIZES[TT_NUM_SIZES] = {
-    12.0f, // XS
-    14.0f, // SM
-    18.0f, // MD
-    26.0f, // LG
-    42.0f  // XL
+    11.0f, // XS
+    13.0f, // SM
+    16.0f, // MD
+    22.0f, // LG
+    34.0f, // XL
+    50.0f  // XXL (Minimal Hero Clock)
 };
 
 static const char* FONT_PATHS[] = {

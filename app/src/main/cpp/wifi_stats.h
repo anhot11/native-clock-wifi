@@ -53,6 +53,15 @@ typedef struct {
     NetInterfaceInfo interfaces[MAX_NET_IFACES];
     int iface_count;
     
+    // System & Performance Metrics
+    int ping_ms;               // Real-time network latency (ms)
+    float ram_used_gb;         // Used RAM in GB
+    float ram_total_gb;        // Total RAM in GB
+    int ram_percent;           // RAM usage percentage (0-100%)
+    int battery_level;         // Battery percentage (0-100%)
+    bool is_charging;          // True if charger connected
+    int link_quality_score;    // Wi-Fi Quality index (0-100%)
+
     // Timing
     double last_update_sec;
 } WifiStats;
