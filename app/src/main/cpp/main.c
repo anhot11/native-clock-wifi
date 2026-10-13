@@ -225,6 +225,21 @@ void ANativeActivity_onCreate(ANativeActivity* activity, void* savedState, size_
     app->animating = true;
     activity->instance = app;
 
+    // Enforce portrait orientation programmatically (ActivityInfo.SCREEN_ORIENTATION_PORTRAIT = 1)
+    if (activity->env && activity->clazz) {
+        jclass actClass = (*activity->env)->GetObjectClass(activity->env, activity->clazz);
+        if (actClass) {
+            jmethodID setReqOrient = (*activity->env)->GetMethodID(activity->env, actClass, "setRequestedOrientation", "(I)V");
+            if (setReqOrient) {
+                (*activity->env)->CallVoidMethod(activity->env, activity->clazz, setReqOrient, 1);
+            }
+            if ((*activity->env)->ExceptionCheck(activity->env)) {
+                (*activity->env)->ExceptionClear(activity->env);
+            }
+            (*activity->env)->DeleteLocalRef(activity->env, actClass);
+        }
+    }
+
     pthread_mutex_init(&app->mutex, NULL);
     pthread_cond_init(&app->cond, NULL);
 

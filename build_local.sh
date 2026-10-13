@@ -23,7 +23,11 @@ if [ ! -f debug.keystore ]; then
 fi
 apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out app-debug.apk base.apk
 
-echo "[4/4] Installing on device via ADB..."
-adb install -r app-debug.apk
-adb shell am start -n com.example.nativec/android.app.NativeActivity
-echo "App successfully installed and launched!"
+echo "[4/4] Installing on device via ADB if connected..."
+if adb devices | grep -q "device$"; then
+  adb install -r app-debug.apk
+  adb shell am start -n com.example.nativec/android.app.NativeActivity
+  echo "App successfully installed and launched in portrait mode!"
+else
+  echo "ADB device not currently connected. APK successfully generated at app-debug.apk!"
+fi

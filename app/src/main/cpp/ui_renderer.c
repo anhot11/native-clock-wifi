@@ -607,7 +607,7 @@ void ui_renderer_draw_frame(UIRenderer* ui, const WifiStats* wifi, float dt) {
             draw_text(ui, "DESCONECTADO", pad + content_w - 114, cur_y + 15, 1, th->danger);
         }
 
-        int gauge_cx = pad + 85;
+        int gauge_cx = pad + 75;
         int gauge_cy = cur_y + 115;
         int gauge_r = 55;
         float max_speed_f = (wifi->max_tx_speed_mbps > 0) ? (float)wifi->max_tx_speed_mbps : 150.0f;
@@ -624,10 +624,21 @@ void ui_renderer_draw_frame(UIRenderer* ui, const WifiStats* wifi, float dt) {
         draw_text_centered(ui, speed_num, gauge_cx, gauge_cy - 14, 2, th->text_primary);
         draw_text_centered(ui, "Mbps", gauge_cx, gauge_cy + 10, 1, th->accent);
 
-        int info_x = pad + 165;
+        int info_x = pad + 150;
         int info_y = cur_y + 50;
         draw_text(ui, "Red SSID:", info_x, info_y, 1, th->text_secondary);
-        draw_text(ui, wifi->ssid, info_x, info_y + 16, 1, th->text_primary);
+
+        char ssid_display[48];
+        strncpy(ssid_display, wifi->ssid, sizeof(ssid_display) - 1);
+        ssid_display[sizeof(ssid_display) - 1] = '\0';
+        int max_ssid_chars = (content_w - 165) / 7;
+        if (max_ssid_chars > 3 && (int)strlen(ssid_display) > max_ssid_chars) {
+            ssid_display[max_ssid_chars - 3] = '.';
+            ssid_display[max_ssid_chars - 2] = '.';
+            ssid_display[max_ssid_chars - 1] = '.';
+            ssid_display[max_ssid_chars] = '\0';
+        }
+        draw_text(ui, ssid_display, info_x, info_y + 16, 1, th->text_primary);
 
         info_y += 36;
         draw_text(ui, "Senal:", info_x, info_y + 4, 1, th->text_secondary);
@@ -653,7 +664,7 @@ void ui_renderer_draw_frame(UIRenderer* ui, const WifiStats* wifi, float dt) {
         cur_y += wifi_card_h + 16;
 
         // TrafficStats Card with Sparkline
-        int net_card_h = 160;
+        int net_card_h = 195;
         draw_rounded_card(ui, pad, cur_y, content_w, net_card_h, 14, th->card_bg, th->card_border);
         draw_text(ui, "TRAFICO EN TIEMPO REAL (TrafficStats)", pad + 16, cur_y + 12, 1, th->text_muted);
 
@@ -677,9 +688,24 @@ void ui_renderer_draw_frame(UIRenderer* ui, const WifiStats* wifi, float dt) {
         int graph_x = pad + 16;
         int graph_y = cur_y + 88;
         int graph_w = content_w - 32;
-        int graph_h = 56;
+        int graph_h = 60;
         uint32_t spark_fill = RGBA(16, 185, 129, 35);
         draw_sparkline(ui, graph_x, graph_y, graph_w, graph_h, wifi->rx_history, HISTORY_LEN, wifi->history_idx, th->success, spark_fill);
+
+        char total_str[96];
+        double total_rx_mb = (double)wifi->total_rx_bytes / (1024.0 * 1024.0);
+        double total_tx_mb = (double)wifi->total_tx_bytes / (1024.0 * 1024.0);
+        snprintf(total_str, sizeof(total_str), "Total: Rx: %.1f MB | Tx: %.1f MB", total_rx_mb, total_tx_mb);
+        draw_text_centered(ui, total_str, pad + content_w / 2, cur_y + 162, 1, th->text_muted);
+
+        cur_y += net_card_h + 16;
+
+        // Bottom status badge in portrait
+        if (cur_y + 40 <= ui->height) {
+            int badge_h = 36;
+            draw_rounded_card(ui, pad, cur_y, content_w, badge_h, 8, th->card_bg, th->card_border);
+            draw_text_centered(ui, "MODO VERTICAL ACTIVO  |  100% C PURO  |  60 FPS", pad + content_w / 2, cur_y + 12, 1, th->text_muted);
+        }
     }
 
     // Touch Ripple effect
