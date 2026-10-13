@@ -1,0 +1,12 @@
+*.apk
+*.idsig
+*.keystore
+*.so
+lib/
+.gradle/
+build/
+app/build/
+.cxx/
+app/.cxx/
+*.log
+screen*.png
