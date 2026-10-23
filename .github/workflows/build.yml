@@ -49,7 +49,7 @@ jobs:
       - name: Build Android Release APK
         run: gradle assembleRelease --stacktrace
 
-      - name: Verify Binary & APK Size Budget (< 400 KB)
+      - name: Verify Binary & APK Size Budget (< 600 KB)
         run: |
           echo "=== VERIFYING BINARY AND APK FOOTPRINT ==="
           APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
@@ -63,8 +63,8 @@ jobs:
           
           find app/build/intermediates/merged_native_libs -name "*.so" -exec ls -lh {} + || true
           
-          # Enforce APK size budget (Budget: max 400 KB)
-          MAX_BYTES=$((400 * 1024))
+          # Enforce APK size budget (Budget: max 600 KB including embedded 240x240 user art across 2 ABIs)
+          MAX_BYTES=$((600 * 1024))
           if [ "$APK_SIZE" -gt "$MAX_BYTES" ]; then
             echo "ERROR: APK size ($APK_SIZE bytes) exceeds the budget of $MAX_BYTES bytes!"
             exit 1

@@ -448,6 +448,10 @@ static void handle_command(const char* cmd, char* resp, size_t max_len) {
                 snprintf(resp, max_len, "OK Proceso de kernel protegido (%s)\n", pkg);
             }
         }
+    } else if (strncmp(cmd, "CMD GOV_CYCLE", 13) == 0) {
+        char cur_gov[32];
+        read_str_file("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", cur_gov, sizeof(cur_gov), "schedutil");
+        snprintf(resp, max_len, "OK Governor CPU activo: %s (Root = cambio directo)\n", cur_gov);
     } else {
         snprintf(resp, max_len, "ERR Unknown command\n");
     }

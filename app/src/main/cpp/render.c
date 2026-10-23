@@ -561,3 +561,169 @@ void render_icon_warning(const RenderTarget* target, int cx, int cy, int size, u
     render_fill_rect(target, cx - 1, cy - size / 4, 2, size / 3, RGB(10, 11, 14));
     render_fill_rect(target, cx - 1, cy + size / 4, 2, 2, RGB(10, 11, 14));
 }
+
+#include "embedded_art.h"
+#ifdef __ANDROID__
+#include <jni.h>
+#endif
+
+#define ART_DIM 240
+static uint32_t g_art_pixels[NUM_EMBEDDED_ARTS][ART_DIM * ART_DIM];
+static bool g_art_initialized = false;
+
+void render_art_init_jni(void* jni_env_ptr) {
+    if (g_art_initialized) return;
+
+    // Fallback procedural gradient if JNI is unavailable (e.g., host unit tests)
+    for (int a = 0; a < NUM_EMBEDDED_ARTS; a++) {
+        for (int y = 0; y < ART_DIM; y++) {
+            for (int x = 0; x < ART_DIM; x++) {
+                uint8_t r = (uint8_t)((x * 255) / ART_DIM);
+                uint8_t g = (uint8_t)((y * 180) / ART_DIM);
+                uint8_t b = (uint8_t)(80 + a * 35);
+                g_art_pixels[a][y * ART_DIM + x] = RGBA(r, g, b, 255);
+            }
+        }
+    }
+
+#ifdef __ANDROID__
+    if (!jni_env_ptr) return;
+    JNIEnv* env = (JNIEnv*)jni_env_ptr;
+
+    jclass bfClass = (*env)->FindClass(env, "android/graphics/BitmapFactory");
+    jclass bmpClass = (*env)->FindClass(env, "android/graphics/Bitmap");
+    if (!bfClass || !bmpClass) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        return;
+    }
+
+    jmethodID mDecode = (*env)->GetStaticMethodID(env, bfClass, "decodeByteArray", "([BII)Landroid/graphics/Bitmap;");
+    jmethodID mGetWidth = (*env)->GetMethodID(env, bmpClass, "getWidth", "()I");
+    jmethodID mGetHeight = (*env)->GetMethodID(env, bmpClass, "getHeight", "()I");
+    jmethodID mGetPixels = (*env)->GetMethodID(env, bmpClass, "getPixels", "([IIIIIII)V");
+    jmethodID mRecycle = (*env)->GetMethodID(env, bmpClass, "recycle", "()V");
+
+    for (int a = 0; a < NUM_EMBEDDED_ARTS; a++) {
+        jsize len = (jsize)g_art_jpg_len[a];
+        jbyteArray jbytes = (*env)->NewByteArray(env, len);
+        if (!jbytes) continue;
+
+        (*env)->SetByteArrayRegion(env, jbytes, 0, len, (const jbyte*)g_art_jpg_data[a]);
+        jobject bmp = (*env)->CallStaticObjectMethod(env, bfClass, mDecode, jbytes, 0, len);
+        (*env)->DeleteLocalRef(env, jbytes);
+
+        if (bmp) {
+            jint bw = (*env)->CallIntMethod(env, bmp, mGetWidth);
+            jint bh = (*env)->CallIntMethod(env, bmp, mGetHeight);
+            if (bw == ART_DIM && bh == ART_DIM) {
+                jintArray jpix = (*env)->NewIntArray(env, ART_DIM * ART_DIM);
+                if (jpix) {
+                    (*env)->CallVoidMethod(env, bmp, mGetPixels, jpix, 0, ART_DIM, 0, 0, ART_DIM, ART_DIM);
+                    jint* src = (*env)->GetIntArrayElements(env, jpix, NULL);
+                    if (src) {
+                        for (int i = 0; i < ART_DIM * ART_DIM; i++) {
+                            uint32_t argb = (uint32_t)src[i];
+                            uint32_t r = (argb >> 16) & 0xFF;
+                            uint32_t g = (argb >> 8) & 0xFF;
+                            uint32_t b = argb & 0xFF;
+                            g_art_pixels[a][i] = RGBA(r, g, b, 255);
+                        }
+                        (*env)->ReleaseIntArrayElements(env, jpix, src, JNI_ABORT);
+                    }
+                    (*env)->DeleteLocalRef(env, jpix);
+                }
+            }
+            if (mRecycle) (*env)->CallVoidMethod(env, bmp, mRecycle);
+            (*env)->DeleteLocalRef(env, bmp);
+        }
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    }
+
+    (*env)->DeleteLocalRef(env, bfClass);
+    (*env)->DeleteLocalRef(env, bmpClass);
+    g_art_initialized = true;
+#endif
+}
+
+static inline uint32_t sample_art_bilinear_fp(const uint32_t* tex, int fx_fp, int fy_fp) {
+    int x0 = fx_fp >> 16;
+    int y0 = fy_fp >> 16;
+    if (x0 < 0) x0 = 0;
+    else if (x0 >= ART_DIM - 1) x0 = ART_DIM - 2;
+    if (y0 < 0) y0 = 0;
+    else if (y0 >= ART_DIM - 1) y0 = ART_DIM - 2;
+
+    int wx = (fx_fp >> 8) & 0xFF;
+    int wy = (fy_fp >> 8) & 0xFF;
+    int iwx = 256 - wx;
+    int iwy = 256 - wy;
+
+    const uint32_t* row0 = &tex[y0 * ART_DIM + x0];
+    const uint32_t* row1 = row0 + ART_DIM;
+    uint32_t c00 = row0[0];
+    uint32_t c10 = row0[1];
+    uint32_t c01 = row1[0];
+    uint32_t c11 = row1[1];
+
+    int w00 = (iwx * iwy) >> 8;
+    int w10 = (wx  * iwy) >> 8;
+    int w01 = (iwx * wy)  >> 8;
+    int w11 = (wx  * wy)  >> 8;
+
+    uint32_t r = (((c00 & 0xFF) * w00) + ((c10 & 0xFF) * w10) + ((c01 & 0xFF) * w01) + ((c11 & 0xFF) * w11)) >> 8;
+    uint32_t g = ((((c00 >> 8) & 0xFF) * w00) + (((c10 >> 8) & 0xFF) * w10) + (((c01 >> 8) & 0xFF) * w01) + (((c11 >> 8) & 0xFF) * w11)) >> 8;
+    uint32_t b = ((((c00 >> 16) & 0xFF) * w00) + (((c10 >> 16) & 0xFF) * w10) + (((c01 >> 16) & 0xFF) * w01) + (((c11 >> 16) & 0xFF) * w11)) >> 8;
+
+    return RGBA(r, g, b, 255);
+}
+
+void render_art_card(const RenderTarget* target, int art_idx, int x, int y, int w, int h, int radius, uint32_t border_col) {
+    if (!target || !target->pixels || w <= 0 || h <= 0) return;
+    if (art_idx < 0) art_idx = 0;
+    art_idx = art_idx % NUM_EMBEDDED_ARTS;
+
+    if (radius > w / 2) radius = w / 2;
+    if (radius > h / 2) radius = h / 2;
+    if (radius < 0) radius = 0;
+
+    int x0 = (x < 0) ? 0 : x;
+    int x1 = (x + w > target->width) ? target->width : x + w;
+    int y0 = (y < 0) ? 0 : y;
+    int y1 = (y + h > target->height) ? target->height : y + h;
+    if (x0 >= x1 || y0 >= y1) return;
+
+    const uint32_t* tex = g_art_pixels[art_idx];
+    float half_w = (float)w * 0.5f;
+    float half_h = (float)h * 0.5f;
+    float cx = (float)x + half_w;
+    float cy = (float)y + half_h;
+    float r_f = (float)radius;
+    float bx = half_w - r_f;
+    float by = half_h - r_f;
+
+    int step_x_fp = ((ART_DIM - 1) << 16) / w;
+    int step_y_fp = ((ART_DIM - 1) << 16) / h;
+
+    for (int py = y0; py < y1; py++) {
+        int fy_fp = (py - y) * step_y_fp + (step_y_fp >> 1);
+        float qy = fabsf((float)py + 0.5f - cy) - by;
+        bool is_mid_y = (qy <= -1.0f);
+        uint32_t* dst_row = &target->pixels[py * target->stride];
+
+        int fx_fp = (x0 - x) * step_x_fp + (step_x_fp >> 1);
+        for (int px = x0; px < x1; px++, fx_fp += step_x_fp) {
+            if (is_mid_y && px > x + 1 && px < x + w - 2) {
+                dst_row[px] = sample_art_bilinear_fp(tex, fx_fp, fy_fp);
+                continue;
+            }
+            float qx = fabsf((float)px + 0.5f - cx) - bx;
+            if (qx <= -1.0f && qy <= -1.0f) {
+                dst_row[px] = sample_art_bilinear_fp(tex, fx_fp, fy_fp);
+                continue;
+            }
+            uint32_t tex_col = sample_art_bilinear_fp(tex, fx_fp, fy_fp);
+            eval_sdf_corner_pixel(target, px, py, qx, qy, r_f, tex_col, border_col, border_col ? 1 : 0);
+        }
+    }
+}
+

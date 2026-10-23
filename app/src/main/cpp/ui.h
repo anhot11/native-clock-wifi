@@ -34,8 +34,10 @@ typedef struct {
     float touch_last_x;
     double touch_start_time;
 
-    // Gesture States
+    // Gesture & Immersion States
     bool is_telemetry_paused;
+    bool use_24h_clock;
+    int art_offset;
     bool card_expanded[8];
     double last_clock_tap_time;
 

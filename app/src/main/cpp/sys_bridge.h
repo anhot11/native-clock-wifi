@@ -25,7 +25,15 @@ typedef struct {
 
 typedef struct {
     bool is_active;
+    bool is_root;
+    bool use_24h;
+    bool time_fmt_checked;
     float anim_scale;
+
+    char device_model[48];
+    char android_ver[16];
+    char soc_name[32];
+    char cpu_governor[24];
 
     TopProcEntry procs[MAX_TOP_PROCS];
     int proc_count;
@@ -38,7 +46,7 @@ typedef struct {
 } BridgeTelemetry;
 
 void sys_bridge_init(BridgeTelemetry* br);
-void sys_bridge_update(BridgeTelemetry* br, CpuTelemetry* cpu, BattTelemetry* batt);
+void sys_bridge_update(BridgeTelemetry* br, CpuTelemetry* cpu, BattTelemetry* batt, void* jni_env_ptr, void* jni_context_ptr);
 bool sys_bridge_send_cmd(BridgeTelemetry* br, const char* cmd, void* jni_env_ptr, void* jni_context_ptr);
 void sys_vibrate(void* jni_env_ptr, void* jni_context_ptr, int duration_ms);
 

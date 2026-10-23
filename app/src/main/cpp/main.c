@@ -93,8 +93,8 @@ static void* sampler_thread_func(void* param) {
             sys_bridge_send_cmd(&bridge, cmd_to_run, env, ctx);
         }
 
-        // Poll Shizuku/ADB bridge first (if active, feeds /proc/stat, thermals, battery, procs, sockets)
-        sys_bridge_update(&bridge, &cpu, &batt);
+        // Poll Root (su) or Shizuku/ADB bridge first
+        sys_bridge_update(&bridge, &cpu, &batt, env, ctx);
 
         // Update all subsystems (using bridge data if present, or unprivileged fallbacks)
         sys_cpu_update(&cpu);
@@ -164,6 +164,7 @@ static void* render_thread_func(void* param) {
     JNIEnv* render_env = NULL;
     JavaVM* vm = app->activity->vm;
     (*vm)->AttachCurrentThread(vm, &render_env, NULL);
+    render_art_init_jni(render_env);
 
     double last_time = get_monotonic_sec();
     bool first_frame_done = false;

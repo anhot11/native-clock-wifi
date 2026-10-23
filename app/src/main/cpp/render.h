@@ -65,4 +65,9 @@ void render_icon_engine(const RenderTarget* target, int cx, int cy, int size, ui
 void render_icon_heart(const RenderTarget* target, int cx, int cy, int size, uint32_t color);
 void render_icon_warning(const RenderTarget* target, int cx, int cy, int size, uint32_t color);
 
+// Embedded High-Resolution User Artwork (240x240 Bilinear + SDF Rounded Corners)
+void render_art_init_jni(void* jni_env_ptr);
+void render_art_card(const RenderTarget* target, int art_idx, int x, int y, int w, int h, int radius, uint32_t border_col);
+
 #endif // RENDER_H
+
