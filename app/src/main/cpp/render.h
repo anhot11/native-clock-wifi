@@ -65,9 +65,12 @@ void render_icon_engine(const RenderTarget* target, int cx, int cy, int size, ui
 void render_icon_heart(const RenderTarget* target, int cx, int cy, int size, uint32_t color);
 void render_icon_warning(const RenderTarget* target, int cx, int cy, int size, uint32_t color);
 
-// Embedded High-Resolution User Artwork (240x240 Bilinear + SDF Rounded Corners)
+// Embedded High-Resolution User Artwork (Zero-RAM ROM-Indexed + Bilinear + SDF Rounded Corners)
 void render_art_init_jni(void* jni_env_ptr);
 void render_art_card(const RenderTarget* target, int art_idx, int x, int y, int w, int h, int radius, uint32_t border_col);
+
+// Zero-RAM Procedural ASCII Matrix Clock Engine (Modes: 0 = '#' ASCII, 1 = '█' Block, 2 = '0/1' Binary)
+int render_ascii_clock(const RenderTarget* target, const char* str, int x, int y, int cell_px, int ascii_mode, uint32_t on_color, uint32_t off_color);
 
 #endif // RENDER_H
 

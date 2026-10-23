@@ -23,7 +23,9 @@ void ui_init(UIController* ui, float dp_scale) {
     ui->safe_top_dp = 32;
     ui->safe_bot_dp = 54;
     ui->use_24h_clock = false; // 12-hour AM/PM clock synced with user device by default
+    ui->ascii_clock_mode = 0;  // Mode 0: '#' ASCII Terminal Matrix (0 KB RAM)
     ui->art_offset = 0;
+    ui->power_save_mode = false;
 
     text_init(ui->target.dp_scale);
     render_art_init_jni(NULL);
@@ -33,7 +35,7 @@ void ui_init(UIController* ui, float dp_scale) {
     sys_net_init(&ui->net);
     sys_batt_init(&ui->batt);
     sys_bridge_init(&ui->bridge);
-    bench_engine_init(&ui->engine, 14, NULL);
+    bench_engine_init(&ui->engine, 12, NULL);
     bench_state_init(&ui->bench);
 
     ui->anim_cpu_percent = 22.0f;
@@ -74,6 +76,7 @@ static void queue_ui_cmd(UIController* ui, const char* cmd, const char* instant_
     ui->pending_vibrate_ms = 22;
     if (instant_msg) {
         strncpy(ui->bridge.last_action_msg, instant_msg, sizeof(ui->bridge.last_action_msg) - 1);
+        strncpy(ui->bridge.root_diag_msg, instant_msg, sizeof(ui->bridge.root_diag_msg) - 1);
         ui->bridge.last_action_time = get_ui_sec();
     }
 }
@@ -120,13 +123,13 @@ void ui_on_touch_up(UIController* ui, float x, float y) {
             return;
         }
 
-        // 1. Bottom Interactive Navigation Dock (height - DP(92) .. height - DP(46))
+        // 1. Bottom Interactive 5-Tab Navigation Dock (height - DP(92) .. height - DP(46))
         int dock_top = ui->target.height - DP(92);
         int dock_bot = ui->target.height - DP(46);
         if (y >= (float)dock_top && y <= (float)dock_bot) {
             int pad = DP(16);
             int dock_w = ui->target.width - 2 * pad;
-            int tab_idx = (int)((x - (float)pad) / ((float)dock_w / 4.0f));
+            int tab_idx = (int)((x - (float)pad) / ((float)dock_w / (float)PAGE_COUNT));
             if (tab_idx >= 0 && tab_idx < PAGE_COUNT) {
                 ui->active_page = (AppNavPage)tab_idx;
                 ui->target_page_scroll = (float)tab_idx;
@@ -135,28 +138,31 @@ void ui_on_touch_up(UIController* ui, float x, float y) {
             }
         }
 
-        // 2. Top Right Theme Pill
-        if (y >= (float)DP(24) && y <= (float)DP(68) && x >= (float)(ui->target.width - DP(96))) {
-            theme_cycle();
+        // 2. Top Right Quick Action Pill (jumps to AJUSTES, or cycles theme if already in AJUSTES)
+        if (y >= (float)DP(24) && y <= (float)DP(66) && x >= (float)(ui->target.width - DP(96))) {
+            if (ui->active_page != PAGE_SETTINGS) {
+                ui->active_page = PAGE_SETTINGS;
+                ui->target_page_scroll = (float)PAGE_SETTINGS;
+            } else {
+                theme_cycle();
+            }
             ui->pending_vibrate_ms = 18;
-            ui->target_page_scroll = (float)ui->active_page;
             return;
         }
 
         // 3. Page-specific interactive actions
         if (ui->active_page == PAGE_HOME) {
-            // Hero Card (y in DP(68)..DP(184))
-            if (y >= (float)DP(68) && y <= (float)DP(184)) {
-                // Tap on left artwork thumbnail -> cycle user gallery!
-                if (x <= (float)DP(124)) {
+            // Hero Card (y in DP(66)..DP(182))
+            if (y >= (float)DP(66) && y <= (float)DP(182)) {
+                if (x <= (float)DP(120)) {
                     ui->art_offset = (ui->art_offset + 1) % 5;
                     ui->pending_vibrate_ms = 16;
                     ui->target_page_scroll = (float)ui->active_page;
                     return;
                 }
-                // Double tap on Clock -> cycle theme; Single tap -> toggle 12h/24h
+                // Double tap on ASCII Clock -> cycle ASCII style; Single tap -> toggle 12h/24h
                 if (now - ui->last_clock_tap_time < 0.38) {
-                    theme_cycle();
+                    ui->ascii_clock_mode = (ui->ascii_clock_mode + 1) % 3;
                     ui->pending_vibrate_ms = 22;
                     ui->last_clock_tap_time = 0.0;
                 } else {
@@ -168,25 +174,24 @@ void ui_on_touch_up(UIController* ui, float x, float y) {
                 return;
             }
 
-            // Tap on 3 Rings Card (y in DP(192)..DP(302)) -> jump to System page
-            if (y >= (float)DP(192) && y <= (float)DP(302)) {
+            // Tap on 3 Rings Card (y in DP(190)..DP(300)) -> jump to System page
+            if (y >= (float)DP(190) && y <= (float)DP(300)) {
                 ui->active_page = PAGE_SYSTEM;
                 ui->target_page_scroll = (float)PAGE_SYSTEM;
                 ui->pending_vibrate_ms = 15;
                 return;
             }
 
-            // Tap on Health & Art Card left photo (y in DP(310)..DP(416), x <= DP(110)) -> cycle gallery
-            if (y >= (float)DP(310) && y <= (float)DP(416) && x <= (float)DP(110)) {
+            // Tap on Health & Art Card left photo (y in DP(308)..DP(414), x <= DP(110)) -> cycle gallery
+            if (y >= (float)DP(308) && y <= (float)DP(414) && x <= (float)DP(110)) {
                 ui->art_offset = (ui->art_offset + 1) % 5;
                 ui->pending_vibrate_ms = 16;
                 ui->target_page_scroll = (float)ui->active_page;
                 return;
             }
 
-            // Root & System Control Buttons (Card 4: y in DP(424)..DP(614))
-            // Row 1 Buttons (y in DP(436)..DP(482)): Left = BOOST_RAM, Right = GOV_CYCLE
-            if (y >= (float)DP(436) && y <= (float)DP(482)) {
+            // Root & System Control Buttons (Card 4)
+            if (y >= (float)DP(432) && y <= (float)DP(480)) {
                 if (x < (float)(ui->target.width / 2)) {
                     queue_ui_cmd(ui, "CMD BOOST_RAM", "Drop Caches + Liberando RAM...");
                 } else {
@@ -195,8 +200,7 @@ void ui_on_touch_up(UIController* ui, float x, float y) {
                 ui->target_page_scroll = (float)ui->active_page;
                 return;
             }
-            // Row 2 Buttons (y in DP(490)..DP(536)): Left = TRIM_CACHE, Right = TOGGLE_ANIM
-            if (y >= (float)DP(490) && y <= (float)DP(536)) {
+            if (y >= (float)DP(486) && y <= (float)DP(534)) {
                 if (x < (float)(ui->target.width / 2)) {
                     queue_ui_cmd(ui, "CMD TRIM_CACHE", "Ejecutando FSTRIM /data + Cache...");
                 } else {
@@ -206,28 +210,24 @@ void ui_on_touch_up(UIController* ui, float x, float y) {
                 return;
             }
         } else if (ui->active_page == PAGE_NETWORK) {
-            // Tap on Rocket Art on Network page (y in DP(68)..DP(190), x <= DP(124)) -> cycle gallery
-            if (y >= (float)DP(68) && y <= (float)DP(190) && x <= (float)DP(124)) {
+            if (y >= (float)DP(66) && y <= (float)DP(190) && x <= (float)DP(124)) {
                 ui->art_offset = (ui->art_offset + 1) % 5;
                 ui->pending_vibrate_ms = 16;
                 ui->target_page_scroll = (float)ui->active_page;
                 return;
             }
         } else if (ui->active_page == PAGE_SYSTEM) {
-            // Tap on CPU Card top-right Governor badge -> cycle CPU Governor
-            if (y >= (float)DP(68) && y <= (float)DP(110) && x >= (float)(ui->target.width - DP(140))) {
+            if (y >= (float)DP(66) && y <= (float)DP(110) && x >= (float)(ui->target.width - DP(140))) {
                 queue_ui_cmd(ui, "CMD GOV_CYCLE", "Cambiando CPU Governor (Root)...");
                 ui->target_page_scroll = (float)ui->active_page;
                 return;
             }
-            // Tap on Tank/Rainbow Art on System page (y in DP(198)..DP(302), x <= DP(114)) -> cycle gallery
-            if (y >= (float)DP(198) && y <= (float)DP(302) && x <= (float)DP(114)) {
+            if (y >= (float)DP(196) && y <= (float)DP(302) && x <= (float)DP(114)) {
                 ui->art_offset = (ui->art_offset + 1) % 5;
                 ui->pending_vibrate_ms = 16;
                 ui->target_page_scroll = (float)ui->active_page;
                 return;
             }
-            // Tap on Top Processes rows (y in DP(418)..DP(590)) -> kill/stop process
             int row_start_y = DP(418);
             int row_h = DP(40);
             int max_rows = ui->bridge.proc_count < 4 ? ui->bridge.proc_count : 4;
@@ -244,17 +244,66 @@ void ui_on_touch_up(UIController* ui, float x, float y) {
                 }
             }
         } else if (ui->active_page == PAGE_MOTOR_C) {
-            // Tap on Forest Art on Motor C page (y in DP(68)..DP(186), x <= DP(122)) -> cycle gallery
-            if (y >= (float)DP(68) && y <= (float)DP(186) && x <= (float)DP(122)) {
+            if (y >= (float)DP(66) && y <= (float)DP(186) && x <= (float)DP(122)) {
                 ui->art_offset = (ui->art_offset + 1) % 5;
                 ui->pending_vibrate_ms = 16;
                 ui->target_page_scroll = (float)ui->active_page;
                 return;
             }
-            // Tap on Benchmark Button (y in DP(300)..DP(356))
             if (y >= (float)DP(300) && y <= (float)DP(356)) {
                 bench_trigger(&ui->bench);
                 ui->pending_vibrate_ms = 25;
+                ui->target_page_scroll = (float)ui->active_page;
+                return;
+            }
+        } else if (ui->active_page == PAGE_SETTINGS) {
+            // Card 1: Root Re-Check Button (y in DP(148)..DP(196))
+            if (y >= (float)DP(146) && y <= (float)DP(198)) {
+                queue_ui_cmd(ui, "CMD RECHECK_ROOT", "Ejecutando Re-Check de Root (su)...");
+                ui->target_page_scroll = (float)ui->active_page;
+                return;
+            }
+            // Card 1 Quick Root Actions Row (y in DP(204)..DP(248))
+            if (y >= (float)DP(202) && y <= (float)DP(250)) {
+                if (x < (float)(ui->target.width / 2)) {
+                    queue_ui_cmd(ui, "CMD GOV_CYCLE", "Cambiando CPU Governor (Root)...");
+                } else {
+                    queue_ui_cmd(ui, "CMD BOOST_RAM", "Drop Caches del Kernel + RAM...");
+                }
+                ui->target_page_scroll = (float)ui->active_page;
+                return;
+            }
+            // Card 2: ASCII Clock & Time Format Settings
+            // Button: ASCII Clock Style (y in DP(300)..DP(346))
+            if (y >= (float)DP(298) && y <= (float)DP(348)) {
+                ui->ascii_clock_mode = (ui->ascii_clock_mode + 1) % 3;
+                ui->pending_vibrate_ms = 18;
+                ui->target_page_scroll = (float)ui->active_page;
+                return;
+            }
+            // Button: 12h / 24h Format (y in DP(354)..DP(400))
+            if (y >= (float)DP(352) && y <= (float)DP(402)) {
+                ui->use_24h_clock = !ui->use_24h_clock;
+                ui->pending_vibrate_ms = 18;
+                ui->target_page_scroll = (float)ui->active_page;
+                return;
+            }
+            // Card 3: Stability, Photo Gallery & Theme Settings
+            // Row 1 (y in DP(454)..DP(500)): Left = FPS Power Save, Right = Photo Gallery
+            if (y >= (float)DP(452) && y <= (float)DP(502)) {
+                if (x < (float)(ui->target.width / 2)) {
+                    ui->power_save_mode = !ui->power_save_mode;
+                } else {
+                    ui->art_offset = (ui->art_offset + 1) % 5;
+                }
+                ui->pending_vibrate_ms = 18;
+                ui->target_page_scroll = (float)ui->active_page;
+                return;
+            }
+            // Row 2 (y in DP(508)..DP(556)): Cycle Visual Theme
+            if (y >= (float)DP(506) && y <= (float)DP(558)) {
+                theme_cycle();
+                ui->pending_vibrate_ms = 20;
                 ui->target_page_scroll = (float)ui->active_page;
                 return;
             }
@@ -275,7 +324,7 @@ void ui_on_touch_up(UIController* ui, float x, float y) {
     ui->target_page_scroll = (float)ui->active_page;
 }
 
-// Minimalist Top Bar: Real Device Model + Root/Shizuku Badge + Theme Pill
+// Minimalist Top Bar: Real Device Model + Root/Shizuku Badge + Quick Settings/Theme Pill
 static void render_top_bar(UIController* ui, const Theme* th) {
     int pad = DP(16);
     int top_y = DP(ui->safe_top_dp);
@@ -286,7 +335,6 @@ static void render_top_bar(UIController* ui, const Theme* th) {
     snprintf(dev_title, sizeof(dev_title), "%s", ui->bridge.device_model);
     text_draw(&ui->target, dev_title, pad + DP(18), top_y + DP(2), FONT_MD, th->text_primary);
 
-    // Root / Shizuku / Android Version Pill
     int badge_x = pad + DP(18) + text_width(dev_title, FONT_MD) + DP(8);
     char badge_txt[32];
     uint32_t badge_col = th->accent;
@@ -304,16 +352,17 @@ static void render_top_bar(UIController* ui, const Theme* th) {
     render_rounded_rect(&ui->target, badge_x, top_y + DP(3), bw, DP(16), DP(8), color_alpha(badge_col, 38), badge_col, 1);
     text_draw_centered(&ui->target, badge_txt, badge_x + bw / 2, top_y + DP(4), FONT_XS, badge_col);
 
-    // Theme Pill (Top Right)
-    int btn_w = DP(66);
+    // Top-Right Pill: jumps to AJUSTES (or shows active theme name when on AJUSTES)
+    int btn_w = DP(68);
     int btn_h = DP(22);
     int btn_x = ui->target.width - pad - btn_w;
     int btn_y = top_y + DP(2);
     render_glass_card(&ui->target, btn_x, btn_y, btn_w, btn_h, DP(11), th->card_bg_top, th->card_bg_bot, th->card_border, 0);
-    text_draw_centered(&ui->target, th->name, btn_x + btn_w / 2, btn_y + DP(4), FONT_XS, th->accent_glow);
+    const char* top_btn_lbl = (ui->active_page == PAGE_SETTINGS) ? th->name : "AJUSTES";
+    text_draw_centered(&ui->target, top_btn_lbl, btn_x + btn_w / 2, btn_y + DP(4), FONT_XS, th->accent_glow);
 }
 
-// Interactive Bottom Tab Dock
+// Interactive 5-Tab Bottom Navigation Dock (INICIO | RED | SISTEMA | MOTOR C | AJUSTES)
 static void render_bottom_navigation(UIController* ui, const Theme* th) {
     int pad = DP(16);
     int dock_w = ui->target.width - 2 * pad;
@@ -322,11 +371,11 @@ static void render_bottom_navigation(UIController* ui, const Theme* th) {
 
     render_glass_card(&ui->target, pad, dock_y, dock_w, dock_h, DP(17), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
-    static const char* TAB_LABELS[PAGE_COUNT] = { "INICIO", "RED", "SISTEMA", "MOTOR C" };
+    static const char* TAB_LABELS[PAGE_COUNT] = { "INICIO", "RED", "SISTEMA", "MOTOR C", "AJUSTES" };
     int tab_w = dock_w / PAGE_COUNT;
 
-    int pill_x = pad + DP(3) + (int)(ui->page_scroll_x * (float)tab_w);
-    int pill_w = tab_w - DP(6);
+    int pill_x = pad + DP(2) + (int)(ui->page_scroll_x * (float)tab_w);
+    int pill_w = tab_w - DP(4);
     render_rounded_rect(&ui->target, pill_x, dock_y + DP(4), pill_w, dock_h - DP(8), DP(13), color_alpha(th->accent, 45), th->accent, 1);
 
     for (int i = 0; i < PAGE_COUNT; i++) {
@@ -336,24 +385,22 @@ static void render_bottom_navigation(UIController* ui, const Theme* th) {
     }
 }
 
-// PAGE 0: INICIO (IMMERSIVE HERO CLOCK + RINGS + HEALTH + ROOT CONSOLE)
+// PAGE 0: INICIO (ZERO-RAM ASCII CLOCK + USER ART + RINGS + SPARKLINE + ROOT DECK)
 static void render_page_home(UIController* ui, const Theme* th, int page_x) {
     int pad = DP(16);
     int w = ui->target.width - 2 * pad;
     int cur_y = DP(66);
     int gap = DP(8);
 
-    // 1. Immersive Hero Card: User Artwork + 12h/24h Synced Clock + Governor Badge
+    // 1. Immersive Hero Card: User Artwork + Zero-RAM ASCII Clock + Governor Badge
     int hero_h = DP(114);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, hero_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
-    // Left: Crisp 92x92 dp Rounded Artwork (Cowboy / User Gallery)
     int art_sz = DP(92);
     int art_x = page_x + pad + DP(11);
     int art_y = cur_y + DP(11);
     render_art_card(&ui->target, 0 + ui->art_offset, art_x, art_y, art_sz, art_sz, DP(14), th->accent);
 
-    // Right of artwork: Live 12-Hour Clock (or 24h if toggled)
     time_t raw_time;
     time(&raw_time);
     struct tm* tm_info = localtime(&raw_time);
@@ -371,12 +418,16 @@ static void render_page_home(UIController* ui, const Theme* th, int page_x) {
     snprintf(time_sec, sizeof(time_sec), ":%02d", tm_info->tm_sec);
 
     int right_x = art_x + art_sz + DP(14);
-    int clock_y = cur_y + DP(12);
-    int hm_w = text_width(time_hm, FONT_HERO);
+    int clock_y = cur_y + DP(15);
+    int cell_px = DP(4);
+    if (cell_px < 4) cell_px = 4;
 
-    text_draw_tabular(&ui->target, time_hm, right_x, clock_y, FONT_HERO, th->text_primary);
-    text_draw_tabular(&ui->target, ampm_str, right_x + hm_w + DP(6), clock_y + DP(4), FONT_SM, th->accent_glow);
-    text_draw_tabular(&ui->target, time_sec, right_x + hm_w + DP(6), clock_y + DP(21), FONT_SM, th->text_muted);
+    // Render Zero-RAM Procedural ASCII Clock!
+    int ascii_w = render_ascii_clock(&ui->target, time_hm, right_x, clock_y, cell_px,
+                                     ui->ascii_clock_mode, th->text_primary, color_alpha(th->text_muted, 50));
+
+    text_draw_tabular(&ui->target, ampm_str, right_x + ascii_w + DP(4), clock_y - DP(1), FONT_SM, th->accent_glow);
+    text_draw_tabular(&ui->target, time_sec, right_x + ascii_w + DP(4), clock_y + DP(15), FONT_SM, th->text_muted);
 
     static const char* DAYS_ES[] = {"Dom", "Lun", "Mar", "Mie", "Jue", "Vie", "Sab"};
     static const char* MONTHS_ES[] = {"Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"};
@@ -387,21 +438,20 @@ static void render_page_home(UIController* ui, const Theme* th, int page_x) {
         up_m = (si.uptime % 3600) / 60;
     }
     char date_str[64];
-    snprintf(date_str, sizeof(date_str), "%s %02d %s  ·  %ldh %02ldm",
+    snprintf(date_str, sizeof(date_str), "%s %02d %s  ·  %ldh %02ldm  ·  ASCII 0KB",
              DAYS_ES[tm_info->tm_wday], tm_info->tm_mday, MONTHS_ES[tm_info->tm_mon], up_h, up_m);
-    text_draw(&ui->target, date_str, right_x, cur_y + DP(58), FONT_XS, th->text_secondary);
+    text_draw(&ui->target, date_str, right_x, cur_y + DP(56), FONT_XS, th->text_secondary);
 
-    // Hardware SoC + Governor pill inside Hero Card
     char gov_pill[64];
     snprintf(gov_pill, sizeof(gov_pill), "%s  ·  %s  ·  %.1f°C",
              ui->bridge.soc_name, ui->bridge.cpu_governor, ui->cpu.temp_cpu_c);
     int gp_w = text_width(gov_pill, FONT_XS) + DP(14);
-    render_rounded_rect(&ui->target, right_x, cur_y + DP(80), gp_w, DP(20), DP(6), th->surface_inset, th->card_border, 1);
-    text_draw_centered(&ui->target, gov_pill, right_x + gp_w / 2, cur_y + DP(83), FONT_XS, th->accent);
+    render_rounded_rect(&ui->target, right_x, cur_y + DP(78), gp_w, DP(20), DP(6), th->surface_inset, th->card_border, 1);
+    text_draw_centered(&ui->target, gov_pill, right_x + gp_w / 2, cur_y + DP(81), FONT_XS, th->accent);
 
     cur_y += hero_h + gap;
 
-    // 2. Three Pure Visual Hardware Rings (CPU, RAM, BATTERY — No redundant title!)
+    // 2. Three Pure Visual Hardware Rings (CPU, RAM, BATTERY)
     int rings_h = DP(108);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, rings_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
@@ -410,7 +460,6 @@ static void render_page_home(UIController* ui, const Theme* th, int page_x) {
     int ring_thick = DP(5);
     int ring_cy = cur_y + DP(44);
 
-    // Ring 1: CPU
     int c1_x = page_x + pad + ring_col_w / 2;
     uint32_t cpu_col = (ui->anim_cpu_percent < 60.0f) ? th->success : (ui->anim_cpu_percent < 85.0f) ? th->warning : th->danger;
     render_ring(&ui->target, c1_x, ring_cy, ring_r, ring_thick, ui->anim_cpu_percent / 100.0f, -PI_F * 0.5f, 2.0f * PI_F, cpu_col, th->surface_inset);
@@ -420,7 +469,6 @@ static void render_page_home(UIController* ui, const Theme* th, int page_x) {
     text_draw_centered(&ui->target, cpu_txt, c1_x, ring_cy - DP(8), FONT_MD, th->text_primary);
     text_draw_centered(&ui->target, cpu_sub, c1_x, ring_cy + ring_r + DP(7), FONT_XS, th->text_secondary);
 
-    // Ring 2: RAM
     int c2_x = page_x + pad + ring_col_w + ring_col_w / 2;
     uint32_t ram_col = (ui->anim_ram_percent < 75.0f) ? th->accent : th->warning;
     render_ring(&ui->target, c2_x, ring_cy, ring_r, ring_thick, ui->anim_ram_percent / 100.0f, -PI_F * 0.5f, 2.0f * PI_F, ram_col, th->surface_inset);
@@ -430,7 +478,6 @@ static void render_page_home(UIController* ui, const Theme* th, int page_x) {
     text_draw_centered(&ui->target, ram_txt, c2_x, ring_cy - DP(8), FONT_MD, th->text_primary);
     text_draw_centered(&ui->target, ram_sub, c2_x, ring_cy + ring_r + DP(7), FONT_XS, th->text_secondary);
 
-    // Ring 3: BATTERY
     int c3_x = page_x + pad + 2 * ring_col_w + ring_col_w / 2;
     uint32_t batt_col = (ui->anim_batt_percent > 20.0f) ? th->success : th->danger;
     render_ring(&ui->target, c3_x, ring_cy, ring_r, ring_thick, ui->anim_batt_percent / 100.0f, -PI_F * 0.5f, 2.0f * PI_F, batt_col, th->surface_inset);
@@ -442,15 +489,13 @@ static void render_page_home(UIController* ui, const Theme* th, int page_x) {
 
     cur_y += rings_h + gap;
 
-    // 3. Visual Immersion + Live 60s Sparkline + Health Ring Card
+    // 3. Visual Immersion + Live 60s Sparkline
     int vis_h = DP(104);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, vis_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
-    // Left: Second User Artwork ("BE KIND" Pixel Horizon)
     int art2_sz = DP(82);
     render_art_card(&ui->target, 3 + ui->art_offset, page_x + pad + DP(11), cur_y + DP(11), art2_sz, art2_sz, DP(13), th->card_border);
 
-    // Right: Dual 60s Sparkline (CPU + RAM) with clean floating badges
     int sp_x = page_x + pad + DP(104);
     int sp_w = w - DP(116);
     char sp_badge[64];
@@ -475,11 +520,9 @@ static void render_page_home(UIController* ui, const Theme* th, int page_x) {
     int r1_y = cur_y + DP(12);
     int r2_y = r1_y + bh + DP(8);
 
-    // Button 1 (Top-Left): RAM + Drop Caches
     render_rounded_rect(&ui->target, bx, r1_y, half_w, bh, DP(11), color_alpha(th->accent, 36), th->accent, 1);
     text_draw_centered(&ui->target, "DROP CACHES & RAM", bx + half_w / 2, r1_y + DP(13), FONT_XS, th->accent_glow);
 
-    // Button 2 (Top-Right): Root CPU Governor Switcher
     int b2_x = bx + half_w + DP(8);
     uint32_t gov_col = (strcmp(ui->bridge.cpu_governor, "performance") == 0) ? th->warning : th->success;
     render_rounded_rect(&ui->target, b2_x, r1_y, half_w, bh, DP(11), color_alpha(gov_col, 32), gov_col, 1);
@@ -487,11 +530,9 @@ static void render_page_home(UIController* ui, const Theme* th, int page_x) {
     snprintf(gov_btn, sizeof(gov_btn), "GOV: %s", ui->bridge.cpu_governor);
     text_draw_centered(&ui->target, gov_btn, b2_x + half_w / 2, r1_y + DP(13), FONT_XS, gov_col);
 
-    // Button 3 (Bot-Left): FSTRIM /data
     render_rounded_rect(&ui->target, bx, r2_y, half_w, bh, DP(11), color_alpha(th->success, 28), th->success, 1);
     text_draw_centered(&ui->target, "FSTRIM /data & CACHE", bx + half_w / 2, r2_y + DP(13), FONT_XS, th->success);
 
-    // Button 4 (Bot-Right): Turbo 0.5x UI
     bool is_turbo = (ui->bridge.anim_scale < 0.75f);
     uint32_t turbo_col = is_turbo ? th->warning : th->text_secondary;
     render_rounded_rect(&ui->target, b2_x, r2_y, half_w, bh, DP(11), color_alpha(turbo_col, 28), turbo_col, 1);
@@ -499,7 +540,6 @@ static void render_page_home(UIController* ui, const Theme* th, int page_x) {
     snprintf(anim_lbl, sizeof(anim_lbl), "TURBO UI: %.1fx", ui->bridge.anim_scale);
     text_draw_centered(&ui->target, anim_lbl, b2_x + half_w / 2, r2_y + DP(13), FONT_XS, is_turbo ? th->warning : th->text_primary);
 
-    // Status pill at bottom of Control Deck
     int st_y = r2_y + bh + DP(10);
     render_rounded_rect(&ui->target, bx, st_y, bw_full, DP(44), DP(10), th->surface_inset, 0, 0);
     if (ui->bridge.last_action_msg[0] != '\0') {
@@ -509,23 +549,22 @@ static void render_page_home(UIController* ui, const Theme* th, int page_x) {
     } else if (ui->bridge.is_active) {
         text_draw_centered(&ui->target, "SHIZUKU / ADB ACTIVO (UID 2000) · Control del sistema", bx + bw_full / 2, st_y + DP(7), FONT_XS, th->success);
     } else {
-        text_draw_centered(&ui->target, "Toca cualquier foto para cambiar arte · 1 toque reloj = 12h/24h", bx + bw_full / 2, st_y + DP(7), FONT_XS, th->text_secondary);
+        text_draw_centered(&ui->target, "Ve a AJUSTES para Re-Check Root o configurar Reloj ASCII", bx + bw_full / 2, st_y + DP(7), FONT_XS, th->text_secondary);
     }
 
     char sub_info[72];
-    snprintf(sub_info, sizeof(sub_info), "%.2f W (%d mA)  ·  %.0f FPS  ·  0 allocs/frame",
-             ui->batt.power_w, (int)ui->batt.current_ma, ui->engine.fps);
+    snprintf(sub_info, sizeof(sub_info), "%.2f W (%d mA)  ·  %.1f MB RAM App  ·  %.0f FPS",
+             ui->batt.power_w, (int)ui->batt.current_ma, ui->engine.app_ram_anon_mb, ui->engine.fps);
     text_draw_centered(&ui->target, sub_info, bx + bw_full / 2, st_y + DP(24), FONT_XS, th->text_muted);
 }
 
-// PAGE 1: RED (CLEAN WI-FI SHOWCASE + 60S STREAM + SOCKETS — NO DNS MS CLUTTER!)
+// PAGE 1: RED (CLEAN WI-FI SHOWCASE + 60S STREAM + SOCKETS)
 static void render_page_network(UIController* ui, const Theme* th, int page_x) {
     int pad = DP(16);
     int w = ui->target.width - 2 * pad;
     int cur_y = DP(66);
     int gap = DP(10);
 
-    // 1. Wi-Fi Link Speed + Rocket Launch Artwork Showcase
     int speed_card_h = DP(122);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, speed_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
@@ -564,7 +603,6 @@ static void render_page_network(UIController* ui, const Theme* th, int page_x) {
 
     cur_y += speed_card_h + gap;
 
-    // 2. Live RX / TX Stream (60s)
     int traf_card_h = DP(156);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, traf_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
@@ -598,7 +636,6 @@ static void render_page_network(UIController* ui, const Theme* th, int page_x) {
 
     cur_y += traf_card_h + gap;
 
-    // 3. Active Kernel Sockets (/proc/net/tcp)
     int conn_card_h = DP(276);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, conn_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
     text_draw(&ui->target, "SOCKETS ACTIVOS (/proc/net/tcp)", page_x + pad + DP(16), cur_y + DP(12), FONT_XS, th->text_muted);
@@ -631,7 +668,6 @@ static void render_page_system(UIController* ui, const Theme* th, int page_x) {
     int cur_y = DP(66);
     int gap = DP(8);
 
-    // 1. 8-Core CPU Bars + Interactive Root Governor Pill
     int cores_card_h = DP(122);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, cores_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
@@ -640,7 +676,6 @@ static void render_page_system(UIController* ui, const Theme* th, int page_x) {
              ui->cpu.core_count, ui->cpu.cores[0].cur_freq_mhz, ui->cpu.cores[4].cur_freq_mhz, ui->cpu.load_1m);
     text_draw(&ui->target, cpu_head, page_x + pad + DP(14), cur_y + DP(10), FONT_XS, th->text_secondary);
 
-    // Interactive Governor Badge (top-right of CPU card)
     int gov_w = text_width(ui->bridge.cpu_governor, FONT_XS) + DP(16);
     int gov_x = page_x + pad + w - DP(12) - gov_w;
     render_rounded_rect(&ui->target, gov_x, cur_y + DP(7), gov_w, DP(18), DP(6), color_alpha(th->accent, 35), th->accent, 1);
@@ -673,7 +708,6 @@ static void render_page_system(UIController* ui, const Theme* th, int page_x) {
 
     cur_y += cores_card_h + gap;
 
-    // 2. Thermal + Battery Electrical Showcase with Tank/Rainbow User Artwork
     int tb_card_h = DP(104);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, tb_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
@@ -706,7 +740,6 @@ static void render_page_system(UIController* ui, const Theme* th, int page_x) {
 
     cur_y += tb_card_h + gap;
 
-    // 3. Storage (/data) & RAM / ZRAM Bar
     int stor_card_h = DP(82);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, stor_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
@@ -727,7 +760,6 @@ static void render_page_system(UIController* ui, const Theme* th, int page_x) {
 
     cur_y += stor_card_h + gap;
 
-    // 4. Live Root / Shizuku Process Manager
     int proc_card_h = DP(204);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, proc_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
     text_draw(&ui->target, "PROCESOS ACTIVOS (TOP CPU / RAM)", page_x + pad + DP(14), cur_y + DP(10), FONT_XS, th->text_muted);
@@ -762,7 +794,6 @@ static void render_page_motor_c(UIController* ui, const Theme* th, int page_x) {
     int cur_y = DP(66);
     int gap = DP(8);
 
-    // 1. Native C Engine Showcase + Forest Mosaic Artwork
     int proof_card_h = DP(118);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, proof_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
@@ -795,7 +826,6 @@ static void render_page_motor_c(UIController* ui, const Theme* th, int page_x) {
 
     cur_y += proof_card_h + gap;
 
-    // 2. Frame-Time Sparkline & Real FPS
     int frame_card_h = DP(94);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, frame_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
@@ -813,7 +843,6 @@ static void render_page_motor_c(UIController* ui, const Theme* th, int page_x) {
 
     cur_y += frame_card_h + gap;
 
-    // 3. Interactive 2s ARM64 NEON Hardware Benchmark
     int bench_card_h = DP(308);
     render_glass_card(&ui->target, page_x + pad, cur_y, w, bench_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
 
@@ -869,6 +898,106 @@ static void render_page_motor_c(UIController* ui, const Theme* th, int page_x) {
     text_draw_right(&ui->target, tot_str, bx + btn_w - DP(12), sc_y + DP(8), FONT_MD, th->success);
 }
 
+// PAGE 4: AJUSTES (ROOT RE-CHECK ZONE + ASCII CLOCK & STABILITY SETTINGS)
+static void render_page_settings(UIController* ui, const Theme* th, int page_x) {
+    int pad = DP(16);
+    int w = ui->target.width - 2 * pad;
+    int cur_y = DP(66);
+    int gap = DP(10);
+
+    // 1. Root (su) Verification & Re-Check Zone
+    int root_card_h = DP(192);
+    render_glass_card(&ui->target, page_x + pad, cur_y, w, root_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
+
+    int bx = page_x + pad + DP(14);
+    int bw = w - DP(28);
+
+    uint32_t st_col = ui->bridge.is_root ? th->success : (ui->bridge.is_active ? th->accent : th->warning);
+    const char* st_title = ui->bridge.is_root ? "ESTADO: ROOT ACTIVO (UID 0 · KERNEL)"
+                         : (ui->bridge.is_active ? "ESTADO: PUENTE SHIZUKU / ADB (UID 2000)"
+                                                 : "ESTADO: MODO SANDBOX (SIN ROOT ACTIVO)");
+    render_circle(&ui->target, bx + DP(5), cur_y + DP(19), DP(4), st_col);
+    text_draw(&ui->target, st_title, bx + DP(15), cur_y + DP(12), FONT_SM, st_col);
+
+    char bin_line[80];
+    snprintf(bin_line, sizeof(bin_line), "Binario su: %s   ·   Governor: %s",
+             ui->bridge.root_bin_path, ui->bridge.cpu_governor);
+    text_draw(&ui->target, bin_line, bx, cur_y + DP(35), FONT_XS, th->text_secondary);
+
+    render_rounded_rect(&ui->target, bx, cur_y + DP(54), bw, DP(24), DP(6), th->surface_inset, 0, 0);
+    text_draw_centered(&ui->target, ui->bridge.root_diag_msg, bx + bw / 2, cur_y + DP(59), FONT_XS, th->text_primary);
+
+    // Big Interactive Button: RE-CHECK ROOT
+    int btn_recheck_y = cur_y + DP(86);
+    render_rounded_rect(&ui->target, bx, btn_recheck_y, bw, DP(42), DP(11), color_alpha(th->success, 42), th->success, 1);
+    text_draw_centered(&ui->target, "RE-CHECK ROOT (FORZAR VERIFICACION SU)", bx + bw / 2, btn_recheck_y + DP(13), FONT_SM, th->success);
+
+    // Quick Root Test Row: Governor + Drop Caches
+    int row_y = btn_recheck_y + DP(50);
+    int half_w = (bw - DP(8)) / 2;
+    render_rounded_rect(&ui->target, bx, row_y, half_w, DP(38), DP(9), color_alpha(th->accent, 30), th->accent, 1);
+    char gov_txt[36];
+    snprintf(gov_txt, sizeof(gov_txt), "CAMBIAR GOV (%s)", ui->bridge.cpu_governor);
+    text_draw_centered(&ui->target, gov_txt, bx + half_w / 2, row_y + DP(11), FONT_XS, th->accent_glow);
+
+    render_rounded_rect(&ui->target, bx + half_w + DP(8), row_y, half_w, DP(38), DP(9), color_alpha(th->accent, 30), th->accent, 1);
+    text_draw_centered(&ui->target, "DROP CACHES KERNEL", bx + half_w + DP(8) + half_w / 2, row_y + DP(11), FONT_XS, th->accent_glow);
+
+    cur_y += root_card_h + gap;
+
+    // 2. ASCII Clock & Time Format Configuration (Zero-RAM Optimization)
+    int clk_card_h = DP(144);
+    render_glass_card(&ui->target, page_x + pad, cur_y, w, clk_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
+    text_draw(&ui->target, "RELOJ ASCII (0 KB RAM) & FORMATO DE HORA", bx, cur_y + DP(11), FONT_XS, th->text_muted);
+
+    static const char* ASCII_MODE_NAMES[3] = {
+        "ESTILO RELOJ ASCII: [ # ] TERMINAL MATRIX",
+        "ESTILO RELOJ ASCII: [ █ ] CYBER BLOCK",
+        "ESTILO RELOJ ASCII: [ 1/0 ] MATRIZ BINARIA"
+    };
+    int b_ascii_y = cur_y + DP(32);
+    render_rounded_rect(&ui->target, bx, b_ascii_y, bw, DP(42), DP(10), color_alpha(th->accent, 35), th->accent, 1);
+    text_draw_centered(&ui->target, ASCII_MODE_NAMES[ui->ascii_clock_mode % 3], bx + bw / 2, b_ascii_y + DP(13), FONT_XS, th->accent_glow);
+
+    int b_fmt_y = b_ascii_y + DP(50);
+    const char* fmt_lbl = ui->use_24h_clock
+        ? "FORMATO HORA: 24 HORAS (TOCA PARA 12H AM/PM)"
+        : "FORMATO HORA: 12 HORAS AM/PM (SINCRONIZADO)";
+    render_rounded_rect(&ui->target, bx, b_fmt_y, bw, DP(42), DP(10), color_alpha(th->success, 30), th->success, 1);
+    text_draw_centered(&ui->target, fmt_lbl, bx + bw / 2, b_fmt_y + DP(13), FONT_XS, th->success);
+
+    cur_y += clk_card_h + gap;
+
+    // 3. Stability, Memory & Visual Customization
+    int stab_card_h = DP(188);
+    render_glass_card(&ui->target, page_x + pad, cur_y, w, stab_card_h, DP(18), th->card_bg_top, th->card_bg_bot, th->card_border, th->card_shadow);
+    text_draw(&ui->target, "ESTABILIDAD, CONSUMO RAM & APARIENCIA", bx, cur_y + DP(11), FONT_XS, th->text_muted);
+
+    int s_r1_y = cur_y + DP(32);
+    uint32_t fps_col = ui->power_save_mode ? th->warning : th->success;
+    render_rounded_rect(&ui->target, bx, s_r1_y, half_w, DP(42), DP(10), color_alpha(fps_col, 32), fps_col, 1);
+    text_draw_centered(&ui->target, ui->power_save_mode ? "FPS: 30 HZ ECO" : "FPS: 60 HZ FLUIDO",
+                       bx + half_w / 2, s_r1_y + DP(13), FONT_XS, fps_col);
+
+    render_rounded_rect(&ui->target, bx + half_w + DP(8), s_r1_y, half_w, DP(42), DP(10), color_alpha(th->accent, 32), th->accent, 1);
+    char art_lbl[36];
+    snprintf(art_lbl, sizeof(art_lbl), "ARTE ACTIVO: SET #%d", (ui->art_offset % 5) + 1);
+    text_draw_centered(&ui->target, art_lbl, bx + half_w + DP(8) + half_w / 2, s_r1_y + DP(13), FONT_XS, th->accent_glow);
+
+    int s_r2_y = s_r1_y + DP(50);
+    char th_lbl[64];
+    snprintf(th_lbl, sizeof(th_lbl), "CAMBIAR TEMA VISUAL (ACTUAL: %s)", th->name);
+    render_rounded_rect(&ui->target, bx, s_r2_y, bw, DP(42), DP(10), color_alpha(th->accent, 35), th->accent, 1);
+    text_draw_centered(&ui->target, th_lbl, bx + bw / 2, s_r2_y + DP(13), FONT_XS, th->text_primary);
+
+    int st_foot_y = s_r2_y + DP(50);
+    render_rounded_rect(&ui->target, bx, st_foot_y, bw, DP(34), DP(8), th->surface_inset, 0, 0);
+    char stab_info[80];
+    snprintf(stab_info, sizeof(stab_info), "RAM Propia: %.1f MB  ·  Reloj ASCII: 0 KB  ·  SIGPIPE Guard: ON",
+             ui->engine.app_ram_anon_mb);
+    text_draw_centered(&ui->target, stab_info, bx + bw / 2, st_foot_y + DP(10), FONT_XS, th->text_secondary);
+}
+
 void ui_render_frame(UIController* ui, float dt) {
     if (!ui || !ui->target.pixels || ui->target.width <= 0 || ui->target.height <= 0) return;
 
@@ -910,10 +1039,11 @@ void ui_render_frame(UIController* ui, float dt) {
     for (int p = min_p; p <= max_p; p++) {
         int page_x = (int)(((float)p - ui->page_scroll_x) * (float)screen_w);
         switch (p) {
-            case PAGE_HOME:    render_page_home(ui, th, page_x);    break;
-            case PAGE_NETWORK: render_page_network(ui, th, page_x); break;
-            case PAGE_SYSTEM:  render_page_system(ui, th, page_x);  break;
-            case PAGE_MOTOR_C: render_page_motor_c(ui, th, page_x); break;
+            case PAGE_HOME:     render_page_home(ui, th, page_x);     break;
+            case PAGE_NETWORK:  render_page_network(ui, th, page_x);  break;
+            case PAGE_SYSTEM:   render_page_system(ui, th, page_x);   break;
+            case PAGE_MOTOR_C:  render_page_motor_c(ui, th, page_x);  break;
+            case PAGE_SETTINGS: render_page_settings(ui, th, page_x); break;
             default: break;
         }
     }

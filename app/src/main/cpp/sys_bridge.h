@@ -35,6 +35,11 @@ typedef struct {
     char soc_name[32];
     char cpu_governor[24];
 
+    // Root Diagnostics for Settings Zone
+    char root_bin_path[48];
+    char root_diag_msg[96];
+    int root_check_count;
+
     TopProcEntry procs[MAX_TOP_PROCS];
     int proc_count;
 
@@ -48,6 +53,7 @@ typedef struct {
 void sys_bridge_init(BridgeTelemetry* br);
 void sys_bridge_update(BridgeTelemetry* br, CpuTelemetry* cpu, BattTelemetry* batt, void* jni_env_ptr, void* jni_context_ptr);
 bool sys_bridge_send_cmd(BridgeTelemetry* br, const char* cmd, void* jni_env_ptr, void* jni_context_ptr);
+bool sys_bridge_recheck_root(BridgeTelemetry* br);
 void sys_vibrate(void* jni_env_ptr, void* jni_context_ptr, int duration_ms);
 
 #endif // SYS_BRIDGE_H

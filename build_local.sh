@@ -43,6 +43,7 @@ echo "[5/5] Verifying APK size and deploying via ADB..."
 ls -lh libnative-app.so build/monitor_bridge app-debug.apk
 
 if adb devices | grep -q "device$"; then
+  adb shell "pm trim-caches 999999999999999 >/dev/null 2>&1 || true"
   adb push build/monitor_bridge /data/local/tmp/monitor_bridge
   adb shell "chmod 755 /data/local/tmp/monitor_bridge; killall monitor_bridge 2>/dev/null; nohup /data/local/tmp/monitor_bridge </dev/null >/dev/null 2>&1 &"
   adb install -r app-debug.apk

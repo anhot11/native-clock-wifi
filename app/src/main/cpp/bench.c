@@ -133,24 +133,40 @@ void bench_engine_sample_proc(EngineMetrics* engine) {
     if (f) {
         char line[128];
         long rss_kb = 0;
-        long anon_kb = 0;
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "VmRSS:", 6) == 0) {
                 sscanf(line + 6, "%ld", &rss_kb);
-            } else if (strncmp(line, "RssAnon:", 8) == 0) {
-                sscanf(line + 8, "%ld", &anon_kb);
             } else if (strncmp(line, "Threads:", 8) == 0) {
                 sscanf(line + 8, "%d", &engine->app_threads);
             }
         }
         fclose(f);
         if (rss_kb > 0) engine->app_ram_rss_mb = (float)rss_kb / 1024.0f;
-        if (anon_kb > 0) {
-            // Private native memory excluding Zygote preloaded heap
-            float priv_mb = (float)anon_kb / 1024.0f;
-            if (priv_mb > 18.0f) priv_mb -= 14.5f; // Subtract Zygote base anon pages
-            if (priv_mb < 1.2f) priv_mb = 2.1f;
-            engine->app_ram_anon_mb = priv_mb;
+    }
+
+    // Measure exact Native C Engine RAM (libnative-app.so + C native heap/BSS, excluding Java Zygote VM)
+    FILE* fs = fopen("/proc/self/smaps", "r");
+    if (fs) {
+        char line[256];
+        bool in_native_c = false;
+        long native_c_kb = 0;
+        while (fgets(line, sizeof(line), fs)) {
+            if (strchr(line, '-') && strchr(line, ':')) {
+                in_native_c = (strstr(line, "libnative-app.so") != NULL ||
+                               strstr(line, "[heap]") != NULL ||
+                               strstr(line, "libc_malloc") != NULL ||
+                               strstr(line, "scudo:primary") != NULL);
+            } else if (in_native_c && strncmp(line, "Private_Dirty:", 14) == 0) {
+                long kb = 0;
+                if (sscanf(line + 14, "%ld", &kb) == 1) native_c_kb += kb;
+            } else if (in_native_c && strncmp(line, "Private_Clean:", 14) == 0) {
+                long kb = 0;
+                if (sscanf(line + 14, "%ld", &kb) == 1) native_c_kb += kb;
+            }
+        }
+        fclose(fs);
+        if (native_c_kb > 64) {
+            engine->app_ram_anon_mb = (float)native_c_kb / 1024.0f;
         }
     }
 }
@@ -178,9 +194,9 @@ void bench_trigger(BenchmarkState* bench) {
     bench->start_time = get_time_sec();
 }
 
-static uint32_t g_bench_buf_a[256 * 256];
-static uint32_t g_bench_buf_b[256 * 256];
-static uint8_t g_primes_sieve[131072];
+static uint32_t g_bench_buf_a[128 * 128];
+static uint32_t g_bench_buf_b[128 * 128];
+static uint8_t g_primes_sieve[32768];
 
 void bench_update_step(BenchmarkState* bench) {
     if (!bench || !bench->is_running) return;
@@ -202,8 +218,8 @@ void bench_update_step(BenchmarkState* bench) {
 
     if (bench->progress < 0.25f) {
         double t0 = get_time_sec();
-        int passes = 32;
-        int px_count = 256 * 256;
+        int passes = 64;
+        int px_count = 128 * 128;
         for (int p = 0; p < passes; p++) {
             uint32_t fill_col = 0x88442211U + (uint32_t)p;
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
@@ -225,7 +241,7 @@ void bench_update_step(BenchmarkState* bench) {
         }
     } else if (bench->progress < 0.50f) {
         double t0 = get_time_sec();
-        int copies = 48;
+        int copies = 96;
         size_t bytes = sizeof(g_bench_buf_a);
         for (int c = 0; c < copies; c++) {
             memcpy(g_bench_buf_b, g_bench_buf_a, bytes);
@@ -238,8 +254,8 @@ void bench_update_step(BenchmarkState* bench) {
         }
     } else if (bench->progress < 0.75f) {
         double t0 = get_time_sec();
-        int max_n = 65536;
-        int runs = 20;
+        int max_n = 32768;
+        int runs = 32;
         for (int r = 0; r < runs; r++) {
             memset(g_primes_sieve, 1, (size_t)max_n);
             for (int p = 2; p * p < max_n; p++) {

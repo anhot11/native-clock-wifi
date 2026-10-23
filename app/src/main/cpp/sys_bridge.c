@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <signal.h>
 #include <time.h>
 #include <math.h>
 #include <inttypes.h>
@@ -23,6 +24,19 @@ static int g_su_in_fd = -1;
 static int g_su_out_fd = -1;
 static pid_t g_su_pid = -1;
 static double g_last_su_attempt = -99.0;
+static char g_detected_su_path[48] = "su";
+
+static const char* const SU_CANDIDATE_PATHS[] = {
+    "/system/bin/su",
+    "/data/adb/ksu/bin/su",
+    "/data/adb/ap/bin/su",
+    "/data/adb/magisk/su",
+    "/system/xbin/su",
+    "/sbin/su",
+    "/debug_ramdisk/su",
+    "su"
+};
+#define NUM_SU_PATHS 8
 
 static double get_mono_sec(void) {
     struct timespec ts;
@@ -30,7 +44,17 @@ static double get_mono_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-static void read_FirstLine(const char* path, char* out, size_t max_len) {
+static void close_root_shell(void) {
+    if (g_su_in_fd >= 0) { close(g_su_in_fd); g_su_in_fd = -1; }
+    if (g_su_out_fd >= 0) { close(g_su_out_fd); g_su_out_fd = -1; }
+    if (g_su_pid > 0) {
+        kill(g_su_pid, SIGKILL);
+        waitpid(g_su_pid, NULL, WNOHANG);
+        g_su_pid = -1;
+    }
+}
+
+static void read_first_line(const char* path, char* out, size_t max_len) {
     out[0] = '\0';
     int fd = open(path, O_RDONLY);
     if (fd < 0) return;
@@ -47,19 +71,36 @@ static void read_FirstLine(const char* path, char* out, size_t max_len) {
     }
 }
 
+static void detect_su_binary_path(BridgeTelemetry* br) {
+    for (int i = 0; i < NUM_SU_PATHS - 1; i++) {
+        if (access(SU_CANDIDATE_PATHS[i], F_OK) == 0) {
+            strncpy(g_detected_su_path, SU_CANDIDATE_PATHS[i], sizeof(g_detected_su_path) - 1);
+            if (br) strncpy(br->root_bin_path, SU_CANDIDATE_PATHS[i], sizeof(br->root_bin_path) - 1);
+            return;
+        }
+    }
+    if (br) {
+        strncpy(br->root_bin_path, "No detectado en /system|/data", sizeof(br->root_bin_path) - 1);
+    }
+}
+
 void sys_bridge_init(BridgeTelemetry* br) {
     if (!br) return;
+    signal(SIGPIPE, SIG_IGN);
     memset(br, 0, sizeof(BridgeTelemetry));
     br->is_active = false;
     br->is_root = false;
-    br->use_24h = false; // Default to 12-hour AM/PM clock matching user device
+    br->use_24h = false;
     br->time_fmt_checked = false;
     br->anim_scale = 1.0f;
+    br->root_check_count = 0;
 
     strncpy(br->device_model, "Android Device", sizeof(br->device_model) - 1);
     strncpy(br->android_ver, "16", sizeof(br->android_ver) - 1);
     strncpy(br->soc_name, "ARM64", sizeof(br->soc_name) - 1);
     strncpy(br->cpu_governor, "schedutil", sizeof(br->cpu_governor) - 1);
+    strncpy(br->root_bin_path, "Buscando su...", sizeof(br->root_bin_path) - 1);
+    strncpy(br->root_diag_msg, "Pulsa RE-CHECK ROOT para verificar permisos su", sizeof(br->root_diag_msg) - 1);
 
 #ifdef __ANDROID__
     char prop[PROP_VALUE_MAX] = {0};
@@ -76,15 +117,16 @@ void sys_bridge_init(BridgeTelemetry* br) {
     }
 #endif
 
+    detect_su_binary_path(br);
+
     char gov[32] = {0};
-    read_FirstLine("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", gov, sizeof(gov));
+    read_first_line("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", gov, sizeof(gov));
     if (gov[0]) {
         strncpy(br->cpu_governor, gov, sizeof(br->cpu_governor) - 1);
     }
 
-    // Default fallback entries before first poll
     br->proc_count = 4;
-    br->procs[0] = (TopProcEntry){ .pid = getpid(), .cpu_pct = 2.1f, .rss_mb = 2.8f, .name = "com.example.nativec" };
+    br->procs[0] = (TopProcEntry){ .pid = getpid(), .cpu_pct = 2.1f, .rss_mb = 1.6f, .name = "com.example.nativec" };
     br->procs[1] = (TopProcEntry){ .pid = 1227, .cpu_pct = 4.2f, .rss_mb = 236.0f, .name = "system_server" };
     br->procs[2] = (TopProcEntry){ .pid = 592,  .cpu_pct = 3.1f, .rss_mb = 15.2f,  .name = "surfaceflinger" };
     br->procs[3] = (TopProcEntry){ .pid = 2314, .cpu_pct = 1.9f, .rss_mb = 295.0f, .name = "com.google.android.gms" };
@@ -95,12 +137,8 @@ void sys_bridge_init(BridgeTelemetry* br) {
     br->conns[2] = (ActiveConnEntry){ .local_port = 5555,  .remote_addr = "127.0.0.1:5555", .state = "LISTEN", .service = "ADB" };
 }
 
-static bool ensure_root_shell(void) {
+static bool open_root_shell_internal(double timeout_sec) {
     if (g_su_in_fd >= 0 && g_su_out_fd >= 0) return true;
-
-    double now = get_mono_sec();
-    if (now - g_last_su_attempt < 10.0) return false;
-    g_last_su_attempt = now;
 
     int in_pipe[2], out_pipe[2];
     if (pipe(in_pipe) < 0) return false;
@@ -123,12 +161,8 @@ static bool ensure_root_shell(void) {
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
 
-        const char* su_paths[] = {
-            "/system/bin/su", "/system/xbin/su", "/sbin/su",
-            "/debug_ramdisk/su", "/data/adb/ksu/bin/su", "/data/adb/ap/bin/su", "su"
-        };
-        for (int i = 0; i < 7; i++) {
-            execlp(su_paths[i], "su", (char*)NULL);
+        for (int i = 0; i < NUM_SU_PATHS; i++) {
+            execlp(SU_CANDIDATE_PATHS[i], "su", (char*)NULL);
         }
         _exit(127);
     }
@@ -139,16 +173,18 @@ static bool ensure_root_shell(void) {
     int flags = fcntl(out_pipe[0], F_GETFL, 0);
     fcntl(out_pipe[0], F_SETFL, flags | O_NONBLOCK);
 
-    const char* init_cmd = "id -u; echo ===END_ROOT===\n";
+    const char* init_cmd = "id -u; which su 2>/dev/null; echo ===END_ROOT===\n";
     if (write(in_pipe[1], init_cmd, strlen(init_cmd)) <= 0) {
         close(in_pipe[1]); close(out_pipe[0]);
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, WNOHANG);
         return false;
     }
 
     char buf[256] = {0};
     size_t total = 0;
     double start = get_mono_sec();
-    while (get_mono_sec() - start < 2.2 && total < sizeof(buf) - 1) {
+    while (get_mono_sec() - start < timeout_sec && total < sizeof(buf) - 1) {
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(out_pipe[0], &rfds);
@@ -180,16 +216,53 @@ static bool ensure_root_shell(void) {
     return false;
 }
 
+static bool ensure_root_shell(void) {
+    if (g_su_in_fd >= 0 && g_su_out_fd >= 0) return true;
+    double now = get_mono_sec();
+    if (now - g_last_su_attempt < 12.0) return false;
+    g_last_su_attempt = now;
+    return open_root_shell_internal(2.5);
+}
+
+bool sys_bridge_recheck_root(BridgeTelemetry* br) {
+    if (!br) return false;
+    br->root_check_count++;
+    close_root_shell();
+    g_last_su_attempt = get_mono_sec();
+    detect_su_binary_path(br);
+
+    // Wait up to 6.0s on manual Re-Check so user has plenty of time to tap "Grant" in Magisk/KernelSU/APatch dialog!
+    if (open_root_shell_internal(6.0)) {
+        br->is_root = true;
+        br->is_active = true;
+        snprintf(br->root_diag_msg, sizeof(br->root_diag_msg), "ROOT ACTIVO (uid=0) via %s [Check #%d]",
+                 br->root_bin_path, br->root_check_count);
+        strncpy(br->last_action_msg, br->root_diag_msg, sizeof(br->last_action_msg) - 1);
+        br->last_action_time = get_mono_sec();
+        return true;
+    }
+
+    br->is_root = false;
+    if (br->is_active) {
+        snprintf(br->root_diag_msg, sizeof(br->root_diag_msg), "Sin su (uid=0) · Puente Shizuku/ADB Activo [Check #%d]",
+                 br->root_check_count);
+    } else {
+        snprintf(br->root_diag_msg, sizeof(br->root_diag_msg), "No se detecto su activo (%s) [Check #%d]",
+                 br->root_bin_path, br->root_check_count);
+    }
+    strncpy(br->last_action_msg, br->root_diag_msg, sizeof(br->last_action_msg) - 1);
+    br->last_action_time = get_mono_sec();
+    return false;
+}
+
 static int query_root_shell(const char* script_cmd, char* response, size_t max_len, int timeout_ms) {
     if (!ensure_root_shell()) return -1;
 
-    // Drain any stale bytes
     char drain[256];
     while (read(g_su_out_fd, drain, sizeof(drain)) > 0) {}
 
     if (write(g_su_in_fd, script_cmd, strlen(script_cmd)) <= 0) {
-        close(g_su_in_fd); close(g_su_out_fd);
-        g_su_in_fd = -1; g_su_out_fd = -1;
+        close_root_shell();
         return -1;
     }
 
@@ -212,8 +285,7 @@ static int query_root_shell(const char* script_cmd, char* response, size_t max_l
                     return (int)(end_mark - response);
                 }
             } else if (n == 0) {
-                close(g_su_in_fd); close(g_su_out_fd);
-                g_su_in_fd = -1; g_su_out_fd = -1;
+                close_root_shell();
                 return -1;
             }
         }
@@ -263,7 +335,7 @@ static int query_bridge_socket(const char* request, char* response, size_t max_l
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &rtv, sizeof(rtv));
 
-    if (send(sock, request, strlen(request), 0) < 0) {
+    if (send(sock, request, strlen(request), MSG_NOSIGNAL) < 0) {
         close(sock);
         return -1;
     }
@@ -291,33 +363,35 @@ void sys_bridge_update(BridgeTelemetry* br, CpuTelemetry* cpu, BattTelemetry* ba
     (void)jni_context_ptr;
 
     char gov[32] = {0};
-    read_FirstLine("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", gov, sizeof(gov));
+    read_first_line("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", gov, sizeof(gov));
     if (gov[0]) {
         strncpy(br->cpu_governor, gov, sizeof(br->cpu_governor) - 1);
     }
 
     static char buf[8192];
-    int n = query_bridge_socket("GET\n", buf, sizeof(buf), 25);
+    int n = -1;
     bool from_root = false;
 
-    if (n <= 0 || strncmp(buf, "BRIDGE 1", 8) != 0) {
-        // Try Direct Native Root (su) on Android 11-16
-        const char* root_poll =
-            "echo BRIDGE 1;"
-            "awk '/^cpu/{print \"STAT\",$0}' /proc/stat 2>/dev/null;"
-            "awk '{print \"LOAD\",$1,$2,$3}' /proc/loadavg 2>/dev/null;"
-            "echo \"GOV $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)\";"
-            "B=/sys/class/power_supply/battery;"
-            "echo \"BATT $(cat $B/capacity 2>/dev/null || echo 80) $(cat $B/voltage_now 2>/dev/null || echo 3950000) $(cat $B/current_now 2>/dev/null || echo -300000) $(cat $B/temp 2>/dev/null || echo 320) $(cat $B/cycle_count 2>/dev/null || echo 1) $(cat $B/charge_full 2>/dev/null || echo 4000000) $(cat $B/charge_counter 2>/dev/null || echo 3200000) $(cat $B/status 2>/dev/null || echo Discharging)\";"
-            "T0=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 36000);"
-            "T1=$(cat /sys/class/thermal/thermal_zone1/temp 2>/dev/null || echo 35000);"
-            "awk -v t0=\"$T0\" -v t1=\"$T1\" 'BEGIN{c=(t0>1000?t0/1000:t0/10); g=(t1>1000?t1/1000:t1/10); printf \"THERM %.1f %.1f %.1f %.1f\\n\", c, g, c-2.5, c-3.2}';"
-            "ps -A -o pid,pcpu,rss,args --sort=-pcpu 2>/dev/null | awk 'NR>1 && NR<=6 {printf \"PROC %s %s %.1f %s\\n\", $1, $2, $3/1024.0, $4}';"
-            "echo ===END_ROOT===\n";
-        n = query_root_shell(root_poll, buf, sizeof(buf), 160);
-        if (n > 0 && strncmp(buf, "BRIDGE 1", 8) == 0) {
-            from_root = true;
-        }
+    // 1. Prefer Direct Native Root (su) on Android 11-16 if active or available
+    const char* root_poll =
+        "echo BRIDGE 1;"
+        "awk '/^cpu/{print \"STAT\",$0}' /proc/stat 2>/dev/null;"
+        "awk '{print \"LOAD\",$1,$2,$3}' /proc/loadavg 2>/dev/null;"
+        "echo \"GOV $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)\";"
+        "B=/sys/class/power_supply/battery;"
+        "echo \"BATT $(cat $B/capacity 2>/dev/null || echo 80) $(cat $B/voltage_now 2>/dev/null || echo 3950000) $(cat $B/current_now 2>/dev/null || echo -300000) $(cat $B/temp 2>/dev/null || echo 320) $(cat $B/cycle_count 2>/dev/null || echo 1) $(cat $B/charge_full 2>/dev/null || echo 4000000) $(cat $B/charge_counter 2>/dev/null || echo 3200000) $(cat $B/status 2>/dev/null || echo Discharging)\";"
+        "T0=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 36000);"
+        "T1=$(cat /sys/class/thermal/thermal_zone1/temp 2>/dev/null || echo 35000);"
+        "awk -v t0=\"$T0\" -v t1=\"$T1\" 'BEGIN{c=(t0>1000?t0/1000:t0/10); g=(t1>1000?t1/1000:t1/10); printf \"THERM %.1f %.1f %.1f %.1f\\n\", c, g, c-2.5, c-3.2}';"
+        "ps -A -o pid,pcpu,rss,args --sort=-pcpu 2>/dev/null | awk 'NR>1 && NR<=6 {printf \"PROC %s %s %.1f %s\\n\", $1, $2, $3/1024.0, $4}';"
+        "echo ===END_ROOT===\n";
+
+    n = query_root_shell(root_poll, buf, sizeof(buf), 160);
+    if (n > 0 && strncmp(buf, "BRIDGE 1", 8) == 0) {
+        from_root = true;
+    } else {
+        // 2. Fallback to Shizuku / ADB Local Socket Bridge (127.0.0.1:39777)
+        n = query_bridge_socket("GET\n", buf, sizeof(buf), 25);
     }
 
     if (n <= 0 || strncmp(buf, "BRIDGE 1", 8) != 0) {
@@ -330,6 +404,11 @@ void sys_bridge_update(BridgeTelemetry* br, CpuTelemetry* cpu, BattTelemetry* ba
 
     br->is_active = true;
     br->is_root = from_root;
+    if (from_root && br->root_check_count == 0) {
+        snprintf(br->root_diag_msg, sizeof(br->root_diag_msg), "ROOT ACTIVO (uid=0) via %s", br->root_bin_path);
+    } else if (!from_root && br->root_check_count == 0) {
+        snprintf(br->root_diag_msg, sizeof(br->root_diag_msg), "Puente Shizuku/ADB (uid=2000) activo");
+    }
 
     CpuRawStat total_stat = {0};
     CpuRawStat core_stats[MAX_CPU_CORES] = {{0}};
@@ -417,6 +496,12 @@ void sys_bridge_update(BridgeTelemetry* br, CpuTelemetry* cpu, BattTelemetry* ba
 
 bool sys_bridge_send_cmd(BridgeTelemetry* br, const char* cmd, void* jni_env_ptr, void* jni_context_ptr) {
     if (!br || !cmd) return false;
+
+    if (strstr(cmd, "RECHECK_ROOT")) {
+        bool ok = sys_bridge_recheck_root(br);
+        sys_vibrate(jni_env_ptr, jni_context_ptr, ok ? 35 : 20);
+        return ok;
+    }
 
     // 1. Try Root Shell first if active or available
     if (br->is_root || ensure_root_shell()) {

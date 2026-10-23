@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include <string.h>
+#include <signal.h>
 #include <math.h>
 
 #include "ui.h"
@@ -230,11 +231,12 @@ static void* render_thread_func(void* param) {
         }
 
         double elapsed = get_monotonic_sec() - now;
-        bool high_fps_needed = app->ui.is_swiping ||
-                               app->ui.bench.is_running ||
-                               fabsf(app->ui.target_page_scroll - app->ui.page_scroll_x) > 0.005f ||
-                               (now - app->ui.last_user_interaction < 1.2);
-        double target_dt = high_fps_needed ? 0.0166 : 0.0666;
+        bool high_fps_needed = !app->ui.power_save_mode &&
+                               (app->ui.is_swiping ||
+                                app->ui.bench.is_running ||
+                                fabsf(app->ui.target_page_scroll - app->ui.page_scroll_x) > 0.005f ||
+                                (now - app->ui.last_user_interaction < 1.2));
+        double target_dt = high_fps_needed ? 0.0166 : (app->ui.power_save_mode ? 0.0333 : 0.0500);
         double sleep_sec = target_dt - elapsed;
         if (sleep_sec > 0.001) {
             struct timespec req;

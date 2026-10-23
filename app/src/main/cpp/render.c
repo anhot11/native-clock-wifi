@@ -563,89 +563,19 @@ void render_icon_warning(const RenderTarget* target, int cx, int cy, int size, u
 }
 
 #include "embedded_art.h"
-#ifdef __ANDROID__
-#include <jni.h>
-#endif
-
-#define ART_DIM 240
-static uint32_t g_art_pixels[NUM_EMBEDDED_ARTS][ART_DIM * ART_DIM];
-static bool g_art_initialized = false;
 
 void render_art_init_jni(void* jni_env_ptr) {
-    if (g_art_initialized) return;
-
-    // Fallback procedural gradient if JNI is unavailable (e.g., host unit tests)
-    for (int a = 0; a < NUM_EMBEDDED_ARTS; a++) {
-        for (int y = 0; y < ART_DIM; y++) {
-            for (int x = 0; x < ART_DIM; x++) {
-                uint8_t r = (uint8_t)((x * 255) / ART_DIM);
-                uint8_t g = (uint8_t)((y * 180) / ART_DIM);
-                uint8_t b = (uint8_t)(80 + a * 35);
-                g_art_pixels[a][y * ART_DIM + x] = RGBA(r, g, b, 255);
-            }
-        }
-    }
-
-#ifdef __ANDROID__
-    if (!jni_env_ptr) return;
-    JNIEnv* env = (JNIEnv*)jni_env_ptr;
-
-    jclass bfClass = (*env)->FindClass(env, "android/graphics/BitmapFactory");
-    jclass bmpClass = (*env)->FindClass(env, "android/graphics/Bitmap");
-    if (!bfClass || !bmpClass) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        return;
-    }
-
-    jmethodID mDecode = (*env)->GetStaticMethodID(env, bfClass, "decodeByteArray", "([BII)Landroid/graphics/Bitmap;");
-    jmethodID mGetWidth = (*env)->GetMethodID(env, bmpClass, "getWidth", "()I");
-    jmethodID mGetHeight = (*env)->GetMethodID(env, bmpClass, "getHeight", "()I");
-    jmethodID mGetPixels = (*env)->GetMethodID(env, bmpClass, "getPixels", "([IIIIIII)V");
-    jmethodID mRecycle = (*env)->GetMethodID(env, bmpClass, "recycle", "()V");
-
-    for (int a = 0; a < NUM_EMBEDDED_ARTS; a++) {
-        jsize len = (jsize)g_art_jpg_len[a];
-        jbyteArray jbytes = (*env)->NewByteArray(env, len);
-        if (!jbytes) continue;
-
-        (*env)->SetByteArrayRegion(env, jbytes, 0, len, (const jbyte*)g_art_jpg_data[a]);
-        jobject bmp = (*env)->CallStaticObjectMethod(env, bfClass, mDecode, jbytes, 0, len);
-        (*env)->DeleteLocalRef(env, jbytes);
-
-        if (bmp) {
-            jint bw = (*env)->CallIntMethod(env, bmp, mGetWidth);
-            jint bh = (*env)->CallIntMethod(env, bmp, mGetHeight);
-            if (bw == ART_DIM && bh == ART_DIM) {
-                jintArray jpix = (*env)->NewIntArray(env, ART_DIM * ART_DIM);
-                if (jpix) {
-                    (*env)->CallVoidMethod(env, bmp, mGetPixels, jpix, 0, ART_DIM, 0, 0, ART_DIM, ART_DIM);
-                    jint* src = (*env)->GetIntArrayElements(env, jpix, NULL);
-                    if (src) {
-                        for (int i = 0; i < ART_DIM * ART_DIM; i++) {
-                            uint32_t argb = (uint32_t)src[i];
-                            uint32_t r = (argb >> 16) & 0xFF;
-                            uint32_t g = (argb >> 8) & 0xFF;
-                            uint32_t b = argb & 0xFF;
-                            g_art_pixels[a][i] = RGBA(r, g, b, 255);
-                        }
-                        (*env)->ReleaseIntArrayElements(env, jpix, src, JNI_ABORT);
-                    }
-                    (*env)->DeleteLocalRef(env, jpix);
-                }
-            }
-            if (mRecycle) (*env)->CallVoidMethod(env, bmp, mRecycle);
-            (*env)->DeleteLocalRef(env, bmp);
-        }
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-    }
-
-    (*env)->DeleteLocalRef(env, bfClass);
-    (*env)->DeleteLocalRef(env, bmpClass);
-    g_art_initialized = true;
-#endif
+    // Zero-RAM ROM-indexed artwork: stays in .rodata, requires 0 bytes of RAM and 0 JNI allocations!
+    (void)jni_env_ptr;
 }
 
-static inline uint32_t sample_art_bilinear_fp(const uint32_t* tex, int fx_fp, int fy_fp) {
+static inline void unpack_rgb565(uint16_t c, uint32_t* r, uint32_t* g, uint32_t* b) {
+    *r = ((c >> 11) & 0x1F) * 255 / 31;
+    *g = ((c >> 5)  & 0x3F) * 255 / 63;
+    *b = (c         & 0x1F) * 255 / 31;
+}
+
+static inline uint32_t sample_art_bilinear_fp(const uint16_t* pal, const uint8_t* idx_tex, int fx_fp, int fy_fp) {
     int x0 = fx_fp >> 16;
     int y0 = fy_fp >> 16;
     if (x0 < 0) x0 = 0;
@@ -658,21 +588,23 @@ static inline uint32_t sample_art_bilinear_fp(const uint32_t* tex, int fx_fp, in
     int iwx = 256 - wx;
     int iwy = 256 - wy;
 
-    const uint32_t* row0 = &tex[y0 * ART_DIM + x0];
-    const uint32_t* row1 = row0 + ART_DIM;
-    uint32_t c00 = row0[0];
-    uint32_t c10 = row0[1];
-    uint32_t c01 = row1[0];
-    uint32_t c11 = row1[1];
+    const uint8_t* row0 = &idx_tex[y0 * ART_DIM + x0];
+    const uint8_t* row1 = row0 + ART_DIM;
+
+    uint32_t r00, g00, b00, r10, g10, b10, r01, g01, b01, r11, g11, b11;
+    unpack_rgb565(pal[row0[0]], &r00, &g00, &b00);
+    unpack_rgb565(pal[row0[1]], &r10, &g10, &b10);
+    unpack_rgb565(pal[row1[0]], &r01, &g01, &b01);
+    unpack_rgb565(pal[row1[1]], &r11, &g11, &b11);
 
     int w00 = (iwx * iwy) >> 8;
     int w10 = (wx  * iwy) >> 8;
     int w01 = (iwx * wy)  >> 8;
     int w11 = (wx  * wy)  >> 8;
 
-    uint32_t r = (((c00 & 0xFF) * w00) + ((c10 & 0xFF) * w10) + ((c01 & 0xFF) * w01) + ((c11 & 0xFF) * w11)) >> 8;
-    uint32_t g = ((((c00 >> 8) & 0xFF) * w00) + (((c10 >> 8) & 0xFF) * w10) + (((c01 >> 8) & 0xFF) * w01) + (((c11 >> 8) & 0xFF) * w11)) >> 8;
-    uint32_t b = ((((c00 >> 16) & 0xFF) * w00) + (((c10 >> 16) & 0xFF) * w10) + (((c01 >> 16) & 0xFF) * w01) + (((c11 >> 16) & 0xFF) * w11)) >> 8;
+    uint32_t r = (r00 * w00 + r10 * w10 + r01 * w01 + r11 * w11) >> 8;
+    uint32_t g = (g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11) >> 8;
+    uint32_t b = (b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11) >> 8;
 
     return RGBA(r, g, b, 255);
 }
@@ -692,7 +624,8 @@ void render_art_card(const RenderTarget* target, int art_idx, int x, int y, int 
     int y1 = (y + h > target->height) ? target->height : y + h;
     if (x0 >= x1 || y0 >= y1) return;
 
-    const uint32_t* tex = g_art_pixels[art_idx];
+    const uint16_t* pal = g_art_pal[art_idx];
+    const uint8_t* idx_tex = g_art_idx[art_idx];
     float half_w = (float)w * 0.5f;
     float half_h = (float)h * 0.5f;
     float cx = (float)x + half_w;
@@ -713,17 +646,93 @@ void render_art_card(const RenderTarget* target, int art_idx, int x, int y, int 
         int fx_fp = (x0 - x) * step_x_fp + (step_x_fp >> 1);
         for (int px = x0; px < x1; px++, fx_fp += step_x_fp) {
             if (is_mid_y && px > x + 1 && px < x + w - 2) {
-                dst_row[px] = sample_art_bilinear_fp(tex, fx_fp, fy_fp);
+                dst_row[px] = sample_art_bilinear_fp(pal, idx_tex, fx_fp, fy_fp);
                 continue;
             }
             float qx = fabsf((float)px + 0.5f - cx) - bx;
             if (qx <= -1.0f && qy <= -1.0f) {
-                dst_row[px] = sample_art_bilinear_fp(tex, fx_fp, fy_fp);
+                dst_row[px] = sample_art_bilinear_fp(pal, idx_tex, fx_fp, fy_fp);
                 continue;
             }
-            uint32_t tex_col = sample_art_bilinear_fp(tex, fx_fp, fy_fp);
+            uint32_t tex_col = sample_art_bilinear_fp(pal, idx_tex, fx_fp, fy_fp);
             eval_sdf_corner_pixel(target, px, py, qx, qy, r_f, tex_col, border_col, border_col ? 1 : 0);
         }
     }
+}
+
+// 5x7 Bitwise ROM Table for Zero-RAM ASCII Clock (0..9 and ':')
+static const uint8_t ASCII_CLOCK_GLYPHS[11][7] = {
+    { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E }, // 0
+    { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E }, // 1
+    { 0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F }, // 2
+    { 0x1F, 0x02, 0x04, 0x06, 0x01, 0x11, 0x0E }, // 3
+    { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 }, // 4
+    { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E }, // 5
+    { 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E }, // 6
+    { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 }, // 7
+    { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E }, // 8
+    { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C }, // 9
+    { 0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x00 }  // :
+};
+
+int render_ascii_clock(const RenderTarget* target, const char* str, int x, int y, int cell_px, int ascii_mode, uint32_t on_color, uint32_t off_color) {
+    if (!target || !target->pixels || !str || cell_px <= 1) return 0;
+    int cur_x = x;
+    int gap_px = cell_px + (cell_px >> 1);
+    uint32_t glow_bg = color_alpha(on_color, 55);
+
+    for (const char* p = str; *p; p++) {
+        int idx = -1;
+        int cols = 5;
+        if (*p >= '0' && *p <= '9') {
+            idx = *p - '0';
+        } else if (*p == ':') {
+            idx = 10;
+            cols = 3;
+        } else {
+            cur_x += cols * cell_px;
+            continue;
+        }
+
+        const uint8_t* rows = ASCII_CLOCK_GLYPHS[idx];
+        for (int r = 0; r < 7; r++) {
+            uint8_t row_bits = rows[r];
+            int cy = y + r * cell_px;
+            for (int c = 0; c < cols; c++) {
+                int bit_pos = (cols == 3) ? (3 - c) : (4 - c);
+                bool is_on = ((row_bits >> bit_pos) & 1) != 0;
+                int cx = cur_x + c * cell_px;
+                int bw = cell_px - 1;
+                if (bw < 2) bw = 2;
+
+                if (is_on) {
+                    if (ascii_mode == 0) {
+                        // Mode 0: Crisp '#' ASCII Terminal Matrix
+                        render_fill_rect(target, cx, cy, bw, bw, glow_bg);
+                        if (bw >= 5) {
+                            render_fill_rect(target, cx + 1, cy, 1, bw, on_color);
+                            render_fill_rect(target, cx + bw - 2, cy, 1, bw, on_color);
+                            render_fill_rect(target, cx, cy + 1, bw, 1, on_color);
+                            render_fill_rect(target, cx, cy + bw - 2, bw, 1, on_color);
+                        } else {
+                            render_fill_rect(target, cx, cy, bw, bw, on_color);
+                        }
+                    } else if (ascii_mode == 1) {
+                        // Mode 1: Solid '█' Cyber Block with Scanline
+                        render_fill_rect(target, cx, cy, bw, bw, on_color);
+                    } else {
+                        // Mode 2: '1/0' Binary Matrix
+                        render_fill_rect(target, cx, cy, bw, bw, glow_bg);
+                        render_fill_rect(target, cx + bw / 2, cy, 2, bw, on_color);
+                    }
+                } else if (off_color != 0) {
+                    // Subtle terminal background grid dot '.'
+                    render_fill_rect(target, cx + bw / 2, cy + bw / 2, 1, 1, off_color);
+                }
+            }
+        }
+        cur_x += cols * cell_px + ((cols == 3) ? (cell_px / 2) : gap_px);
+    }
+    return cur_x - x;
 }
 

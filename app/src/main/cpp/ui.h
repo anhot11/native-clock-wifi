@@ -14,11 +14,12 @@
 #include "bench.h"
 
 typedef enum {
-    PAGE_HOME    = 0,
-    PAGE_NETWORK = 1,
-    PAGE_SYSTEM  = 2,
-    PAGE_MOTOR_C = 3,
-    PAGE_COUNT   = 4
+    PAGE_HOME     = 0,
+    PAGE_NETWORK  = 1,
+    PAGE_SYSTEM   = 2,
+    PAGE_MOTOR_C  = 3,
+    PAGE_SETTINGS = 4,
+    PAGE_COUNT    = 5
 } AppNavPage;
 
 typedef struct {
@@ -26,7 +27,7 @@ typedef struct {
     
     // Navigation & Page Swipe
     AppNavPage active_page;
-    float page_scroll_x;     // Animated fractional page offset (0.0 to 3.0)
+    float page_scroll_x;     // Animated fractional page offset (0.0 to 4.0)
     float target_page_scroll;
     bool is_swiping;
     float touch_start_x;
@@ -34,10 +35,11 @@ typedef struct {
     float touch_last_x;
     double touch_start_time;
 
-    // Gesture & Immersion States
+    // Gesture, Clock & Immersion States
     bool is_telemetry_paused;
     bool use_24h_clock;
-    int art_offset;
+    int ascii_clock_mode;    // 0 = '#' ASCII Matrix, 1 = '█' Block, 2 = '1/0' Binary
+    int art_offset;          // 0..4 user photos, 5 = minimalist no-photo mode
     bool card_expanded[8];
     double last_clock_tap_time;
 
@@ -48,9 +50,9 @@ typedef struct {
     float anim_health_score;
     float anim_rx_rate_kbps;
     float anim_tx_rate_kbps;
-    float anim_phase;        // 0.0 to 2*PI for subtle breathing
+    float anim_phase;
 
-    // Pending async command for Shizuku/ADB bridge thread
+    // Pending async command for Root/Shizuku worker thread
     char pending_cmd[96];
     bool has_pending_cmd;
     int pending_vibrate_ms;
@@ -64,7 +66,7 @@ typedef struct {
     EngineMetrics engine;
     BenchmarkState bench;
 
-    // Display & Power
+    // Display & Power Stability
     int safe_top_dp;
     int safe_bot_dp;
     bool power_save_mode;

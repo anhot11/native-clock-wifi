@@ -104,6 +104,11 @@ bool text_init(float dp_scale) {
 
     for (int s = 0; s < FONT_COUNT; s++) {
         FontAtlas* atlas = &g_atlases[s];
+        // FONT_HERO is replaced by the Zero-RAM Procedural ASCII Clock Engine
+        if (s == FONT_HERO) {
+            atlas->pixel_height = (int)(BASE_DP_SIZES[FONT_XL] * dp_scale);
+            continue;
+        }
         atlas->pixel_height = (int)(BASE_DP_SIZES[s] * dp_scale);
         if (atlas->pixel_height < 10) atlas->pixel_height = 10;
 
@@ -116,15 +121,21 @@ bool text_init(float dp_scale) {
         atlas->line_gap = (int)ceilf(line_gap_raw * scale);
 
         // Rasterize ASCII
-        for (int ch = 32; ch < 128; ch++) {
+        for (int ch = 32; ch < 127; ch++) {
             rasterize_glyph(&g_font_info, scale, ch, &atlas->ascii[ch - 32]);
         }
 
         // Tabular digit width: fixed advance from '0'
         atlas->digit_width = atlas->ascii['0' - 32].xadvance;
 
-        // Rasterize Latin-1 supplement (160..255)
-        for (int ch = 160; ch < 256; ch++) {
+        // Only rasterize Latin-1 characters actually used in Spanish & telemetry (° µ · ± accents)
+        static const uint8_t USED_LATIN1[] = {
+            0xB0, 0xB1, 0xB5, 0xB7, // ° ± µ ·
+            0xC1, 0xC9, 0xCD, 0xD1, 0xD3, 0xDA, // Á É Í Ñ Ó Ú
+            0xE1, 0xE9, 0xED, 0xF1, 0xF3, 0xFA  // á é í ñ ó ú
+        };
+        for (size_t i = 0; i < sizeof(USED_LATIN1); i++) {
+            int ch = USED_LATIN1[i];
             rasterize_glyph(&g_font_info, scale, ch, &atlas->latin1[ch - 160]);
         }
     }
