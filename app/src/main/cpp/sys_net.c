@@ -46,23 +46,23 @@ void sys_net_init(NetTelemetry* net) {
     // Target 0: Gateway
     strncpy(net->ping_targets[0].name, "Puerta Enlace", sizeof(net->ping_targets[0].name));
     strncpy(net->ping_targets[0].ip, "192.168.1.1", sizeof(net->ping_targets[0].ip));
-    net->ping_targets[0].port = 53;
+    net->ping_targets[0].port = 80;
     net->ping_targets[0].last_ping_ms = -1;
-    net->ping_targets[0].quality = NET_QUALITY_FAIR;
+    net->ping_targets[0].quality = NET_QUALITY_GOOD;
 
-    // Target 1: Cloudflare
-    strncpy(net->ping_targets[1].name, "Cloudflare DNS", sizeof(net->ping_targets[1].name));
+    // Target 1: Cloudflare HTTPS/DNS
+    strncpy(net->ping_targets[1].name, "Cloudflare 1.1.1.1", sizeof(net->ping_targets[1].name));
     strncpy(net->ping_targets[1].ip, "1.1.1.1", sizeof(net->ping_targets[1].ip));
-    net->ping_targets[1].port = 53;
+    net->ping_targets[1].port = 443;
     net->ping_targets[1].last_ping_ms = -1;
-    net->ping_targets[1].quality = NET_QUALITY_FAIR;
+    net->ping_targets[1].quality = NET_QUALITY_GOOD;
 
-    // Target 2: Google
-    strncpy(net->ping_targets[2].name, "Google DNS", sizeof(net->ping_targets[2].name));
+    // Target 2: Google DNS
+    strncpy(net->ping_targets[2].name, "Google 8.8.8.8", sizeof(net->ping_targets[2].name));
     strncpy(net->ping_targets[2].ip, "8.8.8.8", sizeof(net->ping_targets[2].ip));
-    net->ping_targets[2].port = 53;
+    net->ping_targets[2].port = 443;
     net->ping_targets[2].last_ping_ms = -1;
-    net->ping_targets[2].quality = NET_QUALITY_FAIR;
+    net->ping_targets[2].quality = NET_QUALITY_GOOD;
 
     g_last_rx_bytes = 0;
     g_last_tx_bytes = 0;
@@ -89,14 +89,11 @@ static void scan_interfaces(NetTelemetry* net) {
 
             if (strcmp(info->name, "wlan0") == 0) {
                 strncpy(net->local_ip, info->ip, sizeof(net->local_ip));
-                // Infer gateway if unknown
-                if (strcmp(net->gateway_ip, "--") == 0) {
-                    char* last_dot = strrchr(info->ip, '.');
-                    if (last_dot) {
-                        int prefix_len = (int)(last_dot - info->ip);
-                        snprintf(net->gateway_ip, sizeof(net->gateway_ip), "%.*s.1", prefix_len, info->ip);
-                        strncpy(net->ping_targets[0].ip, net->gateway_ip, sizeof(net->ping_targets[0].ip));
-                    }
+                char* last_dot = strrchr(info->ip, '.');
+                if (last_dot) {
+                    int prefix_len = (int)(last_dot - info->ip);
+                    snprintf(net->gateway_ip, sizeof(net->gateway_ip), "%.*s.1", prefix_len, info->ip);
+                    strncpy(net->ping_targets[0].ip, net->gateway_ip, sizeof(net->ping_targets[0].ip));
                 }
             } else if (strcmp(net->local_ip, "--") == 0 && !info->is_loopback) {
                 strncpy(net->local_ip, info->ip, sizeof(net->local_ip));
@@ -135,13 +132,14 @@ static int measure_tcp_latency_ms(const char* ip_str, int port) {
 
         struct timeval tv;
         tv.tv_sec = 0;
-        tv.tv_usec = 180000; // 180 ms timeout
+        tv.tv_usec = 320000; // 320 ms timeout
 
         if (select(sock + 1, NULL, &fdset, NULL, &tv) > 0) {
             int so_error = 0;
             socklen_t len = sizeof(so_error);
             getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
-            if (so_error == 0) {
+            // Both 0 (SYN-ACK) and ECONNREFUSED (RST from gateway) prove round-trip reachability
+            if (so_error == 0 || so_error == ECONNREFUSED) {
                 double t1 = get_time_sec();
                 close(sock);
                 int ms = (int)((t1 - t0) * 1000.0);
@@ -160,39 +158,50 @@ static int measure_tcp_latency_ms(const char* ip_str, int port) {
 }
 
 static void update_target_stats(PingTarget* target, int ping_ms) {
+    target->pings[target->ping_count % 10] = ping_ms;
+    target->ping_count++;
     target->sent_count++;
+
     if (ping_ms >= 0) {
         target->last_ping_ms = ping_ms;
         target->success_count++;
-        
-        target->pings[target->ping_count % 10] = ping_ms;
-        target->ping_count++;
+    }
 
-        // Calculate jitter (mean deviation)
-        int samples = target->ping_count < 10 ? target->ping_count : 10;
-        float sum = 0.0f;
-        for (int i = 0; i < samples; i++) sum += (float)target->pings[i];
-        float mean = sum / (float)samples;
+    // Calculate jitter & loss over rolling window of up to 10 recent pings
+    int window = target->ping_count < 10 ? target->ping_count : 10;
+    int valid_cnt = 0;
+    float sum = 0.0f;
+    for (int i = 0; i < window; i++) {
+        if (target->pings[i] >= 0) {
+            sum += (float)target->pings[i];
+            valid_cnt++;
+        }
+    }
 
+    if (valid_cnt > 0) {
+        float mean = sum / (float)valid_cnt;
         float dev_sum = 0.0f;
-        for (int i = 0; i < samples; i++) dev_sum += fabsf((float)target->pings[i] - mean);
-        target->jitter_ms = dev_sum / (float)samples;
+        for (int i = 0; i < window; i++) {
+            if (target->pings[i] >= 0) {
+                dev_sum += fabsf((float)target->pings[i] - mean);
+            }
+        }
+        target->jitter_ms = dev_sum / (float)valid_cnt;
+        target->packet_loss = ((float)(window - valid_cnt) * 100.0f) / (float)window;
+    } else {
+        target->packet_loss = 100.0f;
     }
 
-    if (target->sent_count > 0) {
-        target->packet_loss = ((float)(target->sent_count - target->success_count) * 100.0f) / (float)target->sent_count;
-    }
-
-    if (target->last_ping_ms >= 0 && target->last_ping_ms < 50 && target->packet_loss < 5.0f) {
+    if (target->last_ping_ms >= 0 && target->last_ping_ms < 65 && target->packet_loss < 15.0f) {
         target->quality = NET_QUALITY_GOOD;
-    } else if (target->last_ping_ms >= 0 && target->last_ping_ms < 150 && target->packet_loss < 20.0f) {
+    } else if (target->last_ping_ms >= 0 && target->last_ping_ms < 160 && target->packet_loss < 35.0f) {
         target->quality = NET_QUALITY_FAIR;
     } else {
         target->quality = NET_QUALITY_POOR;
     }
 }
 
-static void read_traffic_stats_proc(NetTelemetry* net, uint64_t* rx, uint64_t* tx) {
+static void read_traffic_stats_proc(uint64_t* rx, uint64_t* tx) {
     FILE* f = fopen("/proc/net/dev", "r");
     if (!f) return;
 
@@ -200,7 +209,6 @@ static void read_traffic_stats_proc(NetTelemetry* net, uint64_t* rx, uint64_t* t
     uint64_t total_rx = 0;
     uint64_t total_tx = 0;
 
-    // Skip first two header lines
     if (fgets(line, sizeof(line), f)) {}
     if (fgets(line, sizeof(line), f)) {}
 
@@ -234,9 +242,8 @@ void sys_net_update(NetTelemetry* net, void* jni_env_ptr, void* jni_context_ptr)
     // 1. Live Bandwidth
     uint64_t cur_rx = 0;
     uint64_t cur_tx = 0;
-    read_traffic_stats_proc(net, &cur_rx, &cur_tx);
+    read_traffic_stats_proc(&cur_rx, &cur_tx);
 
-    // If /proc/net/dev blocked, query TrafficStats via JNI
     if (cur_rx == 0 && cur_tx == 0 && jni_env_ptr) {
         JNIEnv* env = (JNIEnv*)jni_env_ptr;
         jclass trafficClass = (*env)->FindClass(env, "android/net/TrafficStats");
@@ -273,7 +280,6 @@ void sys_net_update(NetTelemetry* net, void* jni_env_ptr, void* jni_context_ptr)
     if (net->rx_rate_kbps > net->rx_peak_kbps) net->rx_peak_kbps = net->rx_rate_kbps;
     if (net->tx_rate_kbps > net->tx_peak_kbps) net->tx_peak_kbps = net->tx_rate_kbps;
 
-    // Rolling History
     net->rx_history[net->history_idx] = net->rx_rate_kbps;
     net->tx_history[net->history_idx] = net->tx_rate_kbps;
     net->history_idx = (net->history_idx + 1) % NET_HISTORY_LEN;
@@ -349,8 +355,8 @@ void sys_net_update(NetTelemetry* net, void* jni_env_ptr, void* jni_context_ptr)
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     }
 
-    // 3. Measure Round-Robin Latency Targets every ~600ms
-    if (now - g_last_ping_time >= 0.6) {
+    // 3. Measure Round-Robin Latency Targets every ~500ms
+    if (now - g_last_ping_time >= 0.5) {
         PingTarget* target = &net->ping_targets[g_current_ping_target];
         int ping = measure_tcp_latency_ms(target->ip, target->port);
         update_target_stats(target, ping);

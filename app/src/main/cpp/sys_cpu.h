@@ -21,8 +21,9 @@ typedef struct {
 typedef struct {
     int core_id;
     float usage_percent;   // 0.0 to 100.0%
-    int cur_freq_mhz;      // e.g. 2400 MHz
-    int max_freq_mhz;      // e.g. 2800 MHz
+    int cur_freq_mhz;      // e.g. 2301 MHz
+    int min_freq_mhz;      // e.g. 900 MHz
+    int max_freq_mhz;      // e.g. 2301 MHz
     bool is_online;
 } CpuCoreInfo;
 
@@ -39,7 +40,9 @@ typedef struct {
     float temp_cpu_c;      // e.g. 42.5 C
     float temp_battery_c;  // e.g. 33.0 C
     float temp_gpu_c;      // e.g. 41.0 C
+    float temp_skin_c;     // e.g. 34.0 C
     bool temp_warning;     // true if temp > 75 C
+    bool has_bridge_stat;  // true if fed by Shizuku/ADB bridge
 
     // Rolling History
     float history[CPU_HISTORY_LEN];
@@ -48,5 +51,6 @@ typedef struct {
 
 void sys_cpu_init(CpuTelemetry* cpu);
 void sys_cpu_update(CpuTelemetry* cpu);
+void sys_cpu_apply_bridge_stat(CpuTelemetry* cpu, const CpuRawStat* total, const CpuRawStat* cores, int core_count);
 
 #endif // SYS_CPU_H

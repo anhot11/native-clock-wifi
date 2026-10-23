@@ -13,6 +13,7 @@ add_library(native-app SHARED
     sys_mem.c
     sys_net.c
     sys_batt.c
+    sys_bridge.c
     bench.c
 )
 

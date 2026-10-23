@@ -10,6 +10,7 @@
 #include "sys_mem.h"
 #include "sys_net.h"
 #include "sys_batt.h"
+#include "sys_bridge.h"
 #include "bench.h"
 
 typedef enum {
@@ -47,11 +48,17 @@ typedef struct {
     float anim_tx_rate_kbps;
     float anim_phase;        // 0.0 to 2*PI for subtle breathing
 
+    // Pending async command for Shizuku/ADB bridge thread
+    char pending_cmd[96];
+    bool has_pending_cmd;
+    int pending_vibrate_ms;
+
     // Telemetry Data Snapshots
     CpuTelemetry cpu;
     MemTelemetry mem;
     NetTelemetry net;
     BattTelemetry batt;
+    BridgeTelemetry bridge;
     EngineMetrics engine;
     BenchmarkState bench;
 
@@ -64,7 +71,7 @@ typedef struct {
 
 void ui_init(UIController* ui, float dp_scale);
 void ui_set_framebuffer(UIController* ui, uint32_t* pixels, int width, int height, int stride);
-void ui_update_telemetry(UIController* ui, const CpuTelemetry* cpu, const MemTelemetry* mem, const NetTelemetry* net, const BattTelemetry* batt);
+void ui_update_telemetry(UIController* ui, const CpuTelemetry* cpu, const MemTelemetry* mem, const NetTelemetry* net, const BattTelemetry* batt, const BridgeTelemetry* bridge);
 void ui_render_frame(UIController* ui, float dt);
 
 // Touch inputs

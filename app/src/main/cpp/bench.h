@@ -10,6 +10,7 @@ typedef struct {
     // Process Self Telemetry
     float app_cpu_percent;
     float app_ram_rss_mb;
+    float app_ram_anon_mb;      // Private C heap/arena memory (excluding Zygote shared libs)
     int app_threads;
     uint32_t allocs_per_frame;  // Verified 0
     
@@ -38,6 +39,7 @@ typedef struct {
     float memcpy_gb_s;       // Memory bandwidth GB/s
     float primes_mprimes_s;  // Millions primes / sec
     float neon_gflops;       // Vector math GFLOPS / MOps
+    int total_score;         // Composite hardware benchmark score
 
     // Reference Baselines (Mid-tier ARM SoC)
     float ref_pixel_mpix_s;

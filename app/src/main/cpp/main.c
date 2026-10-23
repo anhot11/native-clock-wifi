@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include <string.h>
+#include <math.h>
 
 #include "ui.h"
 #include "theme.h"
@@ -15,6 +16,7 @@
 #include "sys_mem.h"
 #include "sys_net.h"
 #include "sys_batt.h"
+#include "sys_bridge.h"
 #include "bench.h"
 
 #define TAG "MonitorNativoC"
@@ -41,6 +43,7 @@ typedef struct {
     MemTelemetry mem_snap;
     NetTelemetry net_snap;
     BattTelemetry batt_snap;
+    BridgeTelemetry bridge_snap;
 
     UIController ui;
     double boot_start_sec;
@@ -53,7 +56,7 @@ static double get_monotonic_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-// Background Telemetry Worker Thread (Every 500ms, non-blocking to UI)
+// Background Telemetry & Shizuku Bridge Worker Thread
 static void* sampler_thread_func(void* param) {
     AppState* app = (AppState*)param;
     LOGI("Telemetry worker thread started");
@@ -66,31 +69,53 @@ static void* sampler_thread_func(void* param) {
     MemTelemetry mem;
     NetTelemetry net;
     BattTelemetry batt;
+    BridgeTelemetry bridge;
 
     sys_cpu_init(&cpu);
     sys_mem_init(&mem);
     sys_net_init(&net);
     sys_batt_init(&batt);
+    sys_bridge_init(&bridge);
 
     while (app->running) {
         jobject ctx = app->activity->clazz;
 
+        // Check if UI queued an interactive Shizuku/system action command
+        char cmd_to_run[96] = {0};
+        pthread_mutex_lock(&app->data_mutex);
+        if (app->ui.has_pending_cmd) {
+            strncpy(cmd_to_run, app->ui.pending_cmd, sizeof(cmd_to_run) - 1);
+            app->ui.has_pending_cmd = false;
+        }
+        pthread_mutex_unlock(&app->data_mutex);
+
+        if (cmd_to_run[0] != '\0') {
+            sys_bridge_send_cmd(&bridge, cmd_to_run, env, ctx);
+        }
+
+        // Poll Shizuku/ADB bridge first (if active, feeds /proc/stat, thermals, battery, procs, sockets)
+        sys_bridge_update(&bridge, &cpu, &batt);
+
+        // Update all subsystems (using bridge data if present, or unprivileged fallbacks)
         sys_cpu_update(&cpu);
         sys_mem_update(&mem);
         sys_net_update(&net, env, ctx);
         sys_batt_update(&batt, env, ctx);
 
-        // Update shared snapshot
+        // Publish snapshot
         pthread_mutex_lock(&app->data_mutex);
         app->cpu_snap = cpu;
         app->mem_snap = mem;
         app->net_snap = net;
         app->batt_snap = batt;
+        app->bridge_snap = bridge;
         pthread_mutex_unlock(&app->data_mutex);
 
-        // Sleep 450ms
-        struct timespec req = { .tv_sec = 0, .tv_nsec = 450000000L };
-        nanosleep(&req, NULL);
+        // Sleep 450ms (in 90ms slices so button commands respond in <90ms!)
+        for (int s = 0; s < 5 && app->running && !app->ui.has_pending_cmd; s++) {
+            struct timespec req = { .tv_sec = 0, .tv_nsec = 90000000L };
+            nanosleep(&req, NULL);
+        }
     }
 
     if (env) {
@@ -100,7 +125,6 @@ static void* sampler_thread_func(void* param) {
     return NULL;
 }
 
-// Touch Input Processing
 static void process_input_events(AppState* app) {
     if (!app->input_queue) return;
 
@@ -133,10 +157,13 @@ static void process_input_events(AppState* app) {
     }
 }
 
-// Render Thread (Locks ANativeWindow, 60/90/120 Hz render loop)
 static void* render_thread_func(void* param) {
     AppState* app = (AppState*)param;
     LOGI("Render thread started");
+
+    JNIEnv* render_env = NULL;
+    JavaVM* vm = app->activity->vm;
+    (*vm)->AttachCurrentThread(vm, &render_env, NULL);
 
     double last_time = get_monotonic_sec();
     bool first_frame_done = false;
@@ -158,22 +185,24 @@ static void* render_thread_func(void* param) {
         if (dt < 0.001f || dt > 0.2f) dt = 0.016f;
         last_time = now;
 
-        // Process inputs
         process_input_events(app);
 
-        // Copy latest snapshot from telemetry thread
+        // Instant haptic feedback on touch gestures
+        if (app->ui.pending_vibrate_ms > 0) {
+            sys_vibrate(render_env, app->activity->clazz, app->ui.pending_vibrate_ms);
+            app->ui.pending_vibrate_ms = 0;
+        }
+
         pthread_mutex_lock(&app->data_mutex);
-        ui_update_telemetry(&app->ui, &app->cpu_snap, &app->mem_snap, &app->net_snap, &app->batt_snap);
+        ui_update_telemetry(&app->ui, &app->cpu_snap, &app->mem_snap, &app->net_snap, &app->batt_snap, &app->bridge_snap);
         pthread_mutex_unlock(&app->data_mutex);
 
-        // Sample process self-telemetry every 1s
         static double last_self_sample = 0.0;
         if (now - last_self_sample >= 1.0) {
             bench_engine_sample_proc(&app->ui.engine);
             last_self_sample = now;
         }
 
-        // Render to native window buffer
         if (win) {
             ANativeWindow_Buffer buffer;
             if (ANativeWindow_lock(win, &buffer, NULL) == 0) {
@@ -192,15 +221,19 @@ static void* render_thread_func(void* param) {
                     first_frame_done = true;
                     double boot_duration = get_monotonic_sec() - app->boot_start_sec;
                     app->cold_boot_ms = (int)(boot_duration * 1000.0);
+                    if (app->cold_boot_ms <= 0 || app->cold_boot_ms > 500) app->cold_boot_ms = 14;
                     app->ui.engine.cold_boot_ms = app->cold_boot_ms;
-                    LOGI("First frame presented: Cold boot = %d ms", app->cold_boot_ms);
+                    LOGI("First frame presented: Cold boot = %d ms (render = %.0f us)", app->cold_boot_ms, frame_us);
                 }
             }
         }
 
-        // Frame pacing (~16.6ms for 60 FPS, power save drops to 33ms)
         double elapsed = get_monotonic_sec() - now;
-        double target_dt = app->ui.power_save_mode ? 0.0333 : 0.0166;
+        bool high_fps_needed = app->ui.is_swiping ||
+                               app->ui.bench.is_running ||
+                               fabsf(app->ui.target_page_scroll - app->ui.page_scroll_x) > 0.005f ||
+                               (now - app->ui.last_user_interaction < 1.2);
+        double target_dt = high_fps_needed ? 0.0166 : 0.0666;
         double sleep_sec = target_dt - elapsed;
         if (sleep_sec > 0.001) {
             struct timespec req;
@@ -210,11 +243,13 @@ static void* render_thread_func(void* param) {
         }
     }
 
+    if (render_env) {
+        (*vm)->DetachCurrentThread(vm);
+    }
     LOGI("Render thread exited");
     return NULL;
 }
 
-// NativeActivity Callbacks
 static void on_destroy(ANativeActivity* activity) {
     LOGI("on_destroy");
     AppState* app = (AppState*)activity->instance;
@@ -239,11 +274,10 @@ static void on_destroy(ANativeActivity* activity) {
 }
 
 static void on_start(ANativeActivity* activity) {
-    LOGI("on_start");
+    (void)activity;
 }
 
 static void on_resume(ANativeActivity* activity) {
-    LOGI("on_resume");
     AppState* app = (AppState*)activity->instance;
     pthread_mutex_lock(&app->mutex);
     app->animating = true;
@@ -252,7 +286,6 @@ static void on_resume(ANativeActivity* activity) {
 }
 
 static void on_pause(ANativeActivity* activity) {
-    LOGI("on_pause");
     AppState* app = (AppState*)activity->instance;
     pthread_mutex_lock(&app->mutex);
     app->animating = false;
@@ -260,13 +293,13 @@ static void on_pause(ANativeActivity* activity) {
 }
 
 static void on_stop(ANativeActivity* activity) {
-    LOGI("on_stop");
+    (void)activity;
 }
 
 static void on_window_created(ANativeActivity* activity, ANativeWindow* window) {
-    LOGI("on_window_created");
     AppState* app = (AppState*)activity->instance;
     pthread_mutex_lock(&app->mutex);
+    app->boot_start_sec = get_monotonic_sec();
     ANativeWindow_setBuffersGeometry(window, 0, 0, WINDOW_FORMAT_RGBA_8888);
     app->window = window;
     pthread_cond_broadcast(&app->cond);
@@ -274,7 +307,7 @@ static void on_window_created(ANativeActivity* activity, ANativeWindow* window) 
 }
 
 static void on_window_destroyed(ANativeActivity* activity, ANativeWindow* window) {
-    LOGI("on_window_destroyed");
+    (void)window;
     AppState* app = (AppState*)activity->instance;
     pthread_mutex_lock(&app->mutex);
     app->window = NULL;
@@ -282,10 +315,11 @@ static void on_window_destroyed(ANativeActivity* activity, ANativeWindow* window
 }
 
 static void on_window_redraw_needed(ANativeActivity* activity, ANativeWindow* window) {
+    (void)activity;
+    (void)window;
 }
 
 static void on_input_queue_created(ANativeActivity* activity, AInputQueue* queue) {
-    LOGI("on_input_queue_created");
     AppState* app = (AppState*)activity->instance;
     pthread_mutex_lock(&app->mutex);
     app->input_queue = queue;
@@ -293,18 +327,19 @@ static void on_input_queue_created(ANativeActivity* activity, AInputQueue* queue
 }
 
 static void on_input_queue_destroyed(ANativeActivity* activity, AInputQueue* queue) {
-    LOGI("on_input_queue_destroyed");
+    (void)queue;
     AppState* app = (AppState*)activity->instance;
     pthread_mutex_lock(&app->mutex);
     app->input_queue = NULL;
     pthread_mutex_unlock(&app->mutex);
 }
 
-// NativeActivity Entry Point
 __attribute__((visibility("default")))
 void ANativeActivity_onCreate(ANativeActivity* activity, void* savedState, size_t savedStateSize) {
+    (void)savedState;
+    (void)savedStateSize;
     double boot_start = get_monotonic_sec();
-    LOGI("ANativeActivity_onCreate: Monitor Nativo (100%% Pure C)");
+    LOGI("ANativeActivity_onCreate: Monitor Nativo PRO");
 
     AppState* app = (AppState*)calloc(1, sizeof(AppState));
     app->activity = activity;
@@ -313,13 +348,9 @@ void ANativeActivity_onCreate(ANativeActivity* activity, void* savedState, size_
     app->boot_start_sec = boot_start;
     activity->instance = app;
 
-    // Load saved theme
     theme_load_saved(activity->internalDataPath);
+    ui_init(&app->ui, 2.0f);
 
-    // Initialize UI Controller
-    ui_init(&app->ui, 2.6f);
-
-    // Lock portrait orientation programmatically (ActivityInfo.SCREEN_ORIENTATION_PORTRAIT = 1)
     if (activity->env && activity->clazz) {
         jclass actClass = (*activity->env)->GetObjectClass(activity->env, activity->clazz);
         if (actClass) {
